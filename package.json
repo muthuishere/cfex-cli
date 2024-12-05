@@ -1,0 +1,10 @@
+{
+  "name": "cftun-cli",
+  "version": "1.0.0",
+  "description": "Cloudflare Tunnel CLI Tool",
+  "bin": {
+    "cftun": "./bin/cftun"
+  },
+  "repository": "muthuishere/cftun-cli",
+  "license": "MIT"
+}

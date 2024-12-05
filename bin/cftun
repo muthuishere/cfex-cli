@@ -1,0 +1,196 @@
+#!/bin/bash
+
+# Usage: tun <full_domain> <local_port>
+
+if [ $# -ne 2 ]; then
+    echo "Usage: $0 <full_domain> <local_port>"
+    exit 1
+fi
+
+FULL_DOMAIN=$1
+LOCAL_PORT=$2
+TUNNEL_NAME="tunnel_$(echo $FULL_DOMAIN | tr '.' '_')"
+MAX_WAIT_TIME=60  # Maximum wait time in seconds
+
+# Cloudflare API configuration
+CF_API_TOKEN=$CLOUDFLARE_API_KEY
+CF_ZONE_NAME=$(echo "$1" | cut -d. -f2-)
+CF_ZONE_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$CF_ZONE_NAME" \
+     -H "Authorization: Bearer $CF_API_TOKEN" \
+     -H "Content-Type: application/json" | jq -r '.result[0].id')
+
+
+# Paths
+CLOUDFLARED_DIR="$HOME/.cloudflared"
+mkdir -p "$CLOUDFLARED_DIR"
+
+# Step 1: Verify cloudflared installation
+if ! command -v cloudflared &> /dev/null; then
+    echo "Error: cloudflared is not installed"
+    exit 1
+fi
+
+echo "cloudflared version: $(cloudflared --version)"
+
+# Step 2: Authentication check
+if [ ! -f "$CLOUDFLARED_DIR/cert.pem" ]; then
+    echo "Please authenticate first by running: cloudflared tunnel login"
+    exit 1
+fi
+
+# Function to check if DNS record exists
+dns_record_exists() {
+    local record_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?name=$FULL_DOMAIN" \
+         -H "Authorization: Bearer $CF_API_TOKEN" \
+         -H "Content-Type: application/json" | jq -r '.result[0].id')
+
+    if [ "$record_id" != "null" ] && [ ! -z "$record_id" ]; then
+        return 0  # Record exists
+    else
+        return 1  # Record doesn't exist
+    fi
+}
+
+delete_dns_record() {
+    local record_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?name=$FULL_DOMAIN" \
+         -H "Authorization: Bearer $CF_API_TOKEN" \
+         -H "Content-Type: application/json" | jq -r '.result[0].id')
+
+    if [ "$record_id" != "null" ] && [ ! -z "$record_id" ]; then
+        echo "Deleting DNS record for $FULL_DOMAIN..."
+        curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$record_id" \
+             -H "Authorization: Bearer $CF_API_TOKEN" \
+             -H "Content-Type: application/json"
+    fi
+}
+# Function to wait for DNS record deletion
+wait_for_dns_deletion() {
+    local start_time=$(date +%s)
+    local current_time
+
+    echo "Waiting for DNS record deletion to complete..."
+    while dns_record_exists; do
+        current_time=$(date +%s)
+        if [ $((current_time - start_time)) -ge $MAX_WAIT_TIME ]; then
+            echo "Timeout waiting for DNS record deletion"
+            exit 1
+        fi
+        echo "Still waiting for DNS record deletion... ($(($MAX_WAIT_TIME - $(($current_time - start_time)))) seconds remaining)"
+        sleep 2
+    done
+    echo "DNS record deletion confirmed"
+}
+
+# Function to check if tunnel exists
+tunnel_exists() {
+    cloudflared tunnel list | grep -q "$TUNNEL_NAME"
+    return $?
+}
+
+# Function to wait for tunnel deletion
+wait_for_tunnel_deletion() {
+    local start_time=$(date +%s)
+    local current_time
+
+    echo "Waiting for tunnel deletion to complete..."
+    while tunnel_exists; do
+        current_time=$(date +%s)
+        if [ $((current_time - start_time)) -ge $MAX_WAIT_TIME ]; then
+            echo "Timeout waiting for tunnel deletion"
+            exit 1
+        fi
+        echo "Still waiting for tunnel deletion... ($(($MAX_WAIT_TIME - $(($current_time - start_time)))) seconds remaining)"
+        sleep 2
+    done
+    echo "Tunnel deletion confirmed"
+}
+
+# Check and delete existing tunnel and DNS record
+if tunnel_exists || dns_record_exists; then
+    if tunnel_exists; then
+        echo "Found existing tunnel named $TUNNEL_NAME"
+        echo "Cleaning up existing tunnel..."
+
+        # Get tunnel ID
+        EXISTING_TUNNEL_ID=$(cloudflared tunnel list | grep "$TUNNEL_NAME" | awk '{print $1}')
+
+        # Cleanup existing connections
+        echo "Cleaning up existing connections..."
+        cloudflared tunnel cleanup "$TUNNEL_NAME"
+
+        # Delete the tunnel
+        echo "Deleting existing tunnel..."
+        cloudflared tunnel delete -f "$TUNNEL_NAME"
+
+        # Wait for tunnel to be fully deleted
+        wait_for_tunnel_deletion
+    fi
+
+    if dns_record_exists; then
+        echo "Found existing DNS record for $FULL_DOMAIN"
+        delete_dns_record
+        wait_for_dns_deletion
+    fi
+fi
+
+# Double-check that DNS record is gone before proceeding
+if dns_record_exists; then
+    echo "Error: DNS record still exists after deletion attempt"
+    exit 1
+fi
+
+# Step 3: Create a tunnel
+echo "Creating new tunnel named $TUNNEL_NAME..."
+TUNNEL_ID=$(cloudflared tunnel create "$TUNNEL_NAME" 2>&1 | grep -o '[a-f0-9]\{8\}-[a-f0-9]\{4\}-[a-f0-9]\{4\}-[a-f0-9]\{4\}-[a-f0-9]\{12\}' | head -n 1)
+
+if [ -z "$TUNNEL_ID" ]; then
+    echo "Failed to create tunnel or capture tunnel ID"
+    exit 1
+fi
+
+echo "Tunnel ID: $TUNNEL_ID"
+
+# Step 4: Create configuration file
+CONFIG_FILE="$CLOUDFLARED_DIR/config.yml"
+
+echo "Generating configuration file..."
+cat > "$CONFIG_FILE" << EOF
+url: http://localhost:$LOCAL_PORT
+tunnel: $TUNNEL_ID
+credentials-file: $CLOUDFLARED_DIR/$TUNNEL_ID.json
+EOF
+
+echo "Config file generated at $CONFIG_FILE"
+echo "Configuration contents:"
+cat "$CONFIG_FILE"
+
+# Step 5: Create DNS route
+echo "Creating DNS route..."
+cloudflared tunnel route dns "$TUNNEL_NAME" "$FULL_DOMAIN"
+
+# Step 6: Run the tunnel
+echo "Starting the tunnel..."
+echo "Your service will be accessible at https://$FULL_DOMAIN"
+echo "Press Ctrl+C to stop the tunnel"
+
+cloudflared tunnel run "$TUNNEL_ID"
+
+echo "Tunnel stopped. Cleaning up..."
+
+# Cleanup tunnel
+if tunnel_exists; then
+    echo "Cleaning up tunnel..."
+    cloudflared tunnel cleanup "$TUNNEL_NAME"
+    cloudflared tunnel delete -f "$TUNNEL_NAME"
+    wait_for_tunnel_deletion
+fi
+
+# Cleanup DNS record
+if dns_record_exists; then
+    echo "Cleaning up DNS record..."
+    delete_dns_record
+    wait_for_dns_deletion
+fi
+
+echo "Cleanup completed. Exiting..."
+exit 0
