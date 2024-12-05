@@ -1,9 +1,17 @@
 #!/bin/bash
 
-# Usage: tun <full_domain> <local_port>
+# Usage: cftun <full_domain> <local_port>
 
 if [ $# -ne 2 ]; then
     echo "Usage: $0 <full_domain> <local_port>"
+    exit 1
+fi
+
+
+# Check if CLOUDFLARE_API_KEY is set
+if [ -z "$CLOUDFLARE_API_KEY" ]; then
+    echo "Error: CLOUDFLARE_API_KEY environment variable is not set"
+    echo "Please set it using: export CLOUDFLARE_API_KEY='your-api-token'"
     exit 1
 fi
 
@@ -12,12 +20,27 @@ LOCAL_PORT=$2
 TUNNEL_NAME="tunnel_$(echo $FULL_DOMAIN | tr '.' '_')"
 MAX_WAIT_TIME=60  # Maximum wait time in seconds
 
+
+
+
 # Cloudflare API configuration
+
+
 CF_API_TOKEN=$CLOUDFLARE_API_KEY
 CF_ZONE_NAME=$(echo "$1" | cut -d. -f2-)
 CF_ZONE_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$CF_ZONE_NAME" \
      -H "Authorization: Bearer $CF_API_TOKEN" \
      -H "Content-Type: application/json" | jq -r '.result[0].id')
+
+# Check if zone data is valid
+if [ -z "$CF_ZONE_ID" ]; then
+    echo "Error: Could not fetch zone data for domain $CF_ZONE_NAME"
+    echo "Possible issues:"
+    echo "1. Invalid API token"
+    echo "2. Domain '$CF_ZONE_NAME' not found in your Cloudflare account"
+    echo "3. API token doesn't have permission to access this zone"
+    exit 1
+fi
 
 
 # Paths
@@ -151,7 +174,8 @@ fi
 echo "Tunnel ID: $TUNNEL_ID"
 
 # Step 4: Create configuration file
-CONFIG_FILE="$CLOUDFLARED_DIR/config.yml"
+CONFIG_DOMAIN_NAME=$(echo "$FULL_DOMAIN" | tr '.' '_')
+CONFIG_FILE="$CLOUDFLARED_DIR/${CONFIG_DOMAIN_NAME}_config.yml"
 
 echo "Generating configuration file..."
 cat > "$CONFIG_FILE" << EOF
@@ -173,7 +197,7 @@ echo "Starting the tunnel..."
 echo "Your service will be accessible at https://$FULL_DOMAIN"
 echo "Press Ctrl+C to stop the tunnel"
 
-cloudflared tunnel run "$TUNNEL_ID"
+cloudflared tunnel run --config "$CONFIG_FILE" "$TUNNEL_ID"
 
 echo "Tunnel stopped. Cleaning up..."
 
