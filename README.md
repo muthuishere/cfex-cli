@@ -1,154 +1,138 @@
 # cfex - Cloudflare Exposer CLI
 
-A secure command-line tool for exposing local development environments to the internet using Cloudflare's tunneling technology. Instantly create HTTPS endpoints for your local services without port forwarding or static IPs.
+Expose your local services to the internet using your domain names via Cloudflare's tunneling technology. With cfex, you can create instant HTTPS endpoints for any local service without port forwarding or static IPs.
 
 ## What is cfex?
 
-cfex (Cloudflare Exposer) simplifies the process of creating secure tunnels between your local development environment and the internet. It leverages Cloudflare's tunnel technology to:
+cfex (Cloudflare Exposer CLI) simplifies creating secure tunnels between your local development environment and the internet. It leverages Cloudflare’s tunnel technology to:
+- Expose local services via HTTPS endpoints.
+- Use custom domain names for development and testing.
+- Access your services behind firewalls or NAT.
+- Test webhooks and APIs locally without additional setup.
 
-- Create instant HTTPS endpoints for local services
-- Share development work with clients or team members
-- Test webhooks on local applications
-- Access local development servers from any device
-- Bypass firewalls and NAT limitations securely
+---
 
-All connections are end-to-end encrypted and don't require opening ports or configuring router settings.
+## Why cfex?
 
+When developing web applications, cfex is useful for:
+- **Sharing local development servers**: Share your work with clients or team members.
+- **Webhook testing**: Test external integrations directly from your local environment.
+- **Accessing local services on mobile**: Use your app on other devices.
+- **Demoing features**: Quickly share links for feedback without deploying.
 
-## Platform Support
-
-This tool works on:
-- Linux
-- macOS
-- Windows (only with WSL - Windows Subsystem for Linux)
-
-### Windows Users Important Note
-If you're on Windows, you must use WSL (Windows Subsystem for Linux) to run this tool.
-
-To set up WSL:
-1. Open PowerShell as Administrator and run:
-   ```powershell
-   wsl --install
-   ```
-2. Restart your computer
-3. Follow the Linux installation instructions within your WSL environment
-
-## Prerequisites
-
-Before installing, ensure you have:
-- Cloudflare account with a registered domain
-- `cloudflared` installed ([Installation Guide](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation))
-- `jq` installed (for JSON processing)
-- Cloudflare API token with Zone permissions
-
-## Installation
-
-### Using curl (recommended)
+With cfex, you can:
 ```bash
+# Share your React app
+cfex dev.yourdomain.com:3000    # https://dev.yourdomain.com
+
+# Expose your API
+cfex api.yourdomain.com:8080    # https://api.yourdomain.com
+
+# Test webhooks
+cfex webhook.yourdomain.com:4000 # https://webhook.yourdomain.com
+```
+
+---
+
+## Quick Start
+
+### Prerequisites
+1. **Cloudflare Account with Registered Domain**: [Sign up for free](https://dash.cloudflare.com/).
+2. **cloudflared Installed**: [Install cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation/).
+3. **jq Installed**:
+   - macOS: `brew install jq`
+   - Ubuntu/Debian: `sudo apt install jq`
+4. **Cloudflare API Token**: [Create API Token](https://dash.cloudflare.com/profile/api-tokens) with:
+   - Permissions: `Zone-DNS Edit` and `Zone-Read`
+   - Zone: Include the domain you want to use.
+
+### Installation
+```bash
+# Install cfex
 curl -sSL https://raw.githubusercontent.com/muthuishere/cfex-cli/main/install.sh | bash
 ```
 
-### Manual Installation
+### Authenticate Cloudflared
 ```bash
-git clone https://github.com/muthuishere/cfex-cli.git
-cd cfex-cli
-chmod +x install.sh
-./install.sh
+cloudflared tunnel login
 ```
+This command:
+- Opens Cloudflare's login page.
+- Creates a certificate at `~/.cloudflared/cert.pem`.
 
-## Setup
-
-### 1. Create Cloudflare API Token
-
-1. Visit [Cloudflare Dashboard](https://dash.cloudflare.com) → Profile → API Tokens
-2. Click "Create Token"
-3. Choose "Create Custom Token"
-4. Configure permissions:
-   - Zone - DNS - Edit
-   - Zone - Zone - Read
-5. Set Zone Resources:
-   - Include - All Zones (or specific zones)
-6. Name your token (e.g., "cfex CLI Token")
-7. Create and copy the token
-
-### 2. Configure Environment
-
-Set your API token:
-
+### Set API Token
 ```bash
 export CLOUDFLARE_API_KEY='your-api-token'
 ```
-
-For permanent configuration:
+For persistence:
 ```bash
 echo 'export CLOUDFLARE_API_KEY="your-api-token"' >> ~/.bashrc  # or ~/.zshrc
-source ~/.bashrc  # or source ~/.zshrc
+source ~/.bashrc  # or ~/.zshrc
 ```
+
+---
 
 ## Usage
 
-### Basic Commands
-
+### Expose Services
 ```bash
-# Create tunnel (Format 1)
-cfex <domain> <port>
+# React/Vue/Angular dev server
+cfex dev.yourdomain.com:3000
 
-# Create tunnel (Format 2)
-cfex <domain>:<port>
+# Local API server
+cfex api.yourdomain.com:8080
 
+# Webhook testing
+cfex webhook.yourdomain.com:4000
+```
+
+### Manage Tunnels
+```bash
 # List tunnels
 cfex list
 
-# Delete tunnel
-cfex delete <domain>
+# Delete tunnel(s)
+cfex delete domain.com
 
 # Show help
 cfex --help
 ```
 
-### Examples
-
-```bash
-# Expose React dev server
-cfex app.yourdomain.com 3000
-
-# Share local API
-cfex api.yourdomain.com:8080
-
-# Test webhooks
-cfex webhook.yourdomain.com 4000
-
-# Delete multiple tunnels
-cfex delete app.yourdomain.com api.yourdomain.com
-```
-
-### Features
-
-- Automatic tunnel creation and configuration
-- DNS record management
-- Clean resource cleanup on exit (Ctrl+C)
-- Support for multiple domains
-- Easy listing and deletion of tunnels
+---
 
 ## Troubleshooting
 
-### Common Issues & Solutions
+1. **Installation Issues**:
+   - Verify `cloudflared` and `jq` are installed.
+   - Check permissions for installation directories.
 
-1. **Installation Issues**
-   - Verify prerequisites are installed (`cloudflared`, `jq`)
-   - Ensure proper permissions for installation directory
+2. **Authentication Issues**:
+   - Ensure the API token is set and valid.
+   - Re-run `cloudflared tunnel login` if needed.
 
-2. **Authentication Issues**
-   - Verify `CLOUDFLARE_API_KEY` is correctly set
-   - Confirm API token permissions
-   - Run `cloudflared tunnel login` if needed
+3. **DNS Issues**:
+   - Allow time for DNS propagation.
+   - Verify domain ownership and permissions.
 
-3. **DNS Issues**
-   - Allow time for DNS propagation
-   - Check domain ownership in Cloudflare
-   - Verify zone permissions
+4. **Connection Issues**:
+   - Ensure the service is running on the specified port.
+   - Check for port conflicts or firewall settings.
 
-4. **Connection Issues**
-   - Ensure local service is running
-   - Check port availability
-   - Verify firewall settings
+---
+
+## Platform Support
+- **Linux**
+- **macOS**
+- **Windows** (via WSL):
+  - Install WSL: `wsl --install` in PowerShell (Admin).
+  - Restart your computer.
+  - Follow Linux setup instructions.
+
+---
+
+## Alternatives
+- **ngrok**: Subscription required for custom domains.
+- **LocalTunnel**: Free, but lacks features like DNS management.
+- **cloudflared**: The native client that cfex simplifies.
+
+cfex provides a streamlined solution for exposing your local services using Cloudflare, making it ideal for developers working with custom domains and secure tunnels.

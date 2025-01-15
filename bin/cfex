@@ -13,16 +13,48 @@ validate_basic_requirements() {
                 "Please install cloudflared first")
     fi
 
-    # Check cloudflared authentication
     if [ ! -f "$HOME/.cloudflared/cert.pem" ]; then
-        errors+=("Error: cloudflared not authenticated"
-                "Please authenticate first by running: cloudflared tunnel login")
+        echo "Error: cloudflared not authenticated"
+        echo ""
+        echo "Authentication Process:"
+        echo "1. You will be redirected to Cloudflare's login page"
+        echo "2. Log in to your Cloudflare account"
+        echo "3. Select the PRIMARY domain you want to use for tunneling"
+        echo "   (This should be the root domain you own, e.g., yourdomain.com)"
+        echo "4. Authorize Tunnel for domain"
+        echo ""
+        echo "Note: Once authenticated, you can create tunnels for any subdomain"
+        echo "under your authorized primary domain."
+        echo ""
+        echo "Starting authentication process in 3 seconds..."
+        echo ""
+        sleep 3
+        cloudflared tunnel login
+
+        if [ $? -eq 0 ]; then
+            echo ""
+            echo "Authentication successful!"
+            echo "You can now create tunnels for your domain and its subdomains."
+            echo ""
+        else
+            echo ""
+            echo "Authentication failed. Please try again."
+            echo ""
+        fi
+
+        exit 1
     fi
 
     # Check API key for operations that need it
     if [ -z "$CLOUDFLARE_API_KEY" ]; then
         errors+=("Error: CLOUDFLARE_API_KEY environment variable is not set"
-                "Please set it using: export CLOUDFLARE_API_KEY='your-api-token'")
+                "Create your API token at: https://dash.cloudflare.com/profile/api-tokens"
+                "1. Click 'Create Token'"
+                "2. Use the 'Edit zone DNS' template"
+                "3. Under 'Zone Resources', select 'Include Specific Zone'"
+                "4. Choose the domain you authenticated with cloudflared"
+                ""
+                "Then set it using: export CLOUDFLARE_API_KEY='your-api-token'")
     fi
 
     # Check if jq is installed (needed for JSON processing)
@@ -46,11 +78,21 @@ log_error() {
     echo "Error: $1" >&2
 }
 
-# Function to list all tunnels
 list_tunnels() {
     echo "Active Tunnels:"
     echo "----------------------------------------"
-    cloudflared tunnel list --output json | jq -r '.[] | select(.id != null) |
+
+    # Get the tunnel list JSON
+    local tunnel_json=$(cloudflared tunnel list --output json)
+
+    # Check if the output is empty or null
+    if [ -z "$tunnel_json" ] || [ "$tunnel_json" = "null" ]; then
+        echo "No active tunnels found."
+        return 0
+    fi
+
+    # Process the JSON only if it's valid
+    echo "$tunnel_json" | jq -r '.[] | select(.id != null) |
         . as $tunnel |
         .name |
         if startswith("tunnel_") then
@@ -59,10 +101,17 @@ list_tunnels() {
             .
         end + " " + $tunnel.id' |
     while read -r line; do
-        domain=$(echo "$line" | cut -d' ' -f1)
-        id=$(echo "$line" | cut -d' ' -f2)
-        printf "%-40s %s\n" "$domain" "$id"
+        if [ ! -z "$line" ]; then
+            domain=$(echo "$line" | cut -d' ' -f1)
+            id=$(echo "$line" | cut -d' ' -f2)
+            printf "%-40s %s\n" "$domain" "$id"
+        fi
     done
+
+    # If no tunnels were printed, show a message
+    if [ -z "$(echo "$tunnel_json" | jq -r '.[] | select(.id != null)')" ]; then
+        echo "No active tunnels found."
+    fi
 }
 
 
