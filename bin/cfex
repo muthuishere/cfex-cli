@@ -72,7 +72,7 @@ delete_tunnel() {
 
     if [ $total_domains -eq 0 ]; then
         echo "Error: No domains provided for deletion"
-        echo "Usage: cftun delete <domain1> [domain2] [domain3] ..."
+        echo "Usage: cfex delete <domain1> [domain2] [domain3] ..."
         exit 1
     fi
 
@@ -153,20 +153,20 @@ delete_tunnel() {
 # Help and version information
 show_help() {
     echo "Usage:"
-    echo "  cftun <domain>:<port>              Create tunnel (alternative syntax)"
-    echo "  cftun <domain> <port>              Create tunnel (original syntax)"
-    echo "  cftun list                         List all active tunnels"
-    echo "  cftun delete <domain>              Delete tunnel for specified domain"
+    echo "  cfex <domain>:<port>              Create tunnel (alternative syntax)"
+    echo "  cfex <domain> <port>              Create tunnel (original syntax)"
+    echo "  cfex list                         List all active tunnels"
+    echo "  cfex delete <domain>              Delete tunnel for specified domain"
     echo ""
     echo "Options:"
     echo "  -h, --help                         Show this help message"
     echo "  -v, --version                      Show version information"
     echo ""
     echo "Examples:"
-    echo "  cftun example.com:8080             Create tunnel for example.com on port 8080"
-    echo "  cftun sub.example.com 3000         Create tunnel for sub.example.com on port 3000"
-    echo "  cftun list                         Show all active tunnels"
-    echo "  cftun delete example.com           Delete tunnel for example.com"
+    echo "  cfex example.com:8080             Create tunnel for example.com on port 8080"
+    echo "  cfex sub.example.com 3000         Create tunnel for sub.example.com on port 3000"
+    echo "  cfex list                         Show all active tunnels"
+    echo "  cfex delete example.com           Delete tunnel for example.com"
 }
 
 dns_record_exists() {
@@ -386,7 +386,7 @@ fi
             exit 0
             ;;
         -v|--version)
-            echo "cftun version $VERSION"
+            echo "cfex version $VERSION"
             exit 0
             ;;
         list)
@@ -396,7 +396,7 @@ fi
         delete)
             if [ -z "$2" ]; then
                 echo "Error: Please specify a domain to delete"
-                echo "Usage: cftun delete <domain>"
+                echo "Usage: cfex delete <domain>"
                 exit 1
             fi
             delete_tunnel "$@"
