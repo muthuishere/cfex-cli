@@ -1,10 +1,10 @@
 {
-  "name": "cftun-cli",
+  "name": "cfex-cli",
   "version": "1.0.0",
   "description": "Cloudflare Tunnel CLI Tool",
   "bin": {
-    "cftun": "./bin/cftun"
+    "cfex": "./bin/cfex"
   },
-  "repository": "muthuishere/cftun-cli",
+  "repository": "muthuishere/cfex-cli",
   "license": "MIT"
 }

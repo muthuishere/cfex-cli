@@ -1,0 +1,429 @@
+#!/bin/bash
+
+readonly VERSION="1.0.0"
+readonly MAX_WAIT_TIME=60  # Currently not defined globally
+readonly CLOUDFLARED_DIR="$HOME/.cloudflared"
+
+validate_basic_requirements() {
+    local errors=()
+
+    # Check cloudflared installation
+    if ! command -v cloudflared &> /dev/null; then
+        errors+=("Error: cloudflared is not installed"
+                "Please install cloudflared first")
+    fi
+
+    # Check cloudflared authentication
+    if [ ! -f "$HOME/.cloudflared/cert.pem" ]; then
+        errors+=("Error: cloudflared not authenticated"
+                "Please authenticate first by running: cloudflared tunnel login")
+    fi
+
+    # Check API key for operations that need it
+    if [ -z "$CLOUDFLARE_API_KEY" ]; then
+        errors+=("Error: CLOUDFLARE_API_KEY environment variable is not set"
+                "Please set it using: export CLOUDFLARE_API_KEY='your-api-token'")
+    fi
+
+    # Check if jq is installed (needed for JSON processing)
+    if ! command -v jq &> /dev/null; then
+        errors+=("Error: jq is not installed"
+                "Please install jq first")
+    fi
+
+    # If there are any errors, print them and return failure
+    if [ ${#errors[@]} -ne 0 ]; then
+        echo "Validation Failed!"
+        printf '%s\n' "${errors[@]}"
+        return 1
+    fi
+
+    return 0
+}
+
+
+log_error() {
+    echo "Error: $1" >&2
+}
+
+# Function to list all tunnels
+list_tunnels() {
+    echo "Active Tunnels:"
+    echo "----------------------------------------"
+    cloudflared tunnel list --output json | jq -r '.[] | select(.id != null) |
+        . as $tunnel |
+        .name |
+        if startswith("tunnel_") then
+            (.[7:] | gsub("_"; "."))
+        else
+            .
+        end + " " + $tunnel.id' |
+    while read -r line; do
+        domain=$(echo "$line" | cut -d' ' -f1)
+        id=$(echo "$line" | cut -d' ' -f2)
+        printf "%-40s %s\n" "$domain" "$id"
+    done
+}
+
+
+delete_tunnel() {
+    local domains=("${@:2}")  # Start from the second argument
+    local total_domains=${#domains[@]}
+
+    if [ $total_domains -eq 0 ]; then
+        echo "Error: No domains provided for deletion"
+        echo "Usage: cftun delete <domain1> [domain2] [domain3] ..."
+        exit 1
+    fi
+
+    # Show all domains that will be deleted
+    echo "The following tunnels will be deleted:"
+    for domain in "${domains[@]}"; do
+        local tunnel_name="tunnel_$(echo $domain | tr '.' '_')"
+        if cloudflared tunnel list | grep -q "$tunnel_name"; then
+            echo "- $domain"
+        else
+            echo "- $domain (not found)"
+        fi
+    done
+
+    # Single confirmation for all domains
+    read -p "Are you sure you want to delete these $total_domains tunnels? (y/N) " confirm
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        for domain in "${domains[@]}"; do
+            local tunnel_name="tunnel_$(echo $domain | tr '.' '_')"
+
+            # Check if tunnel exists
+            if ! cloudflared tunnel list | grep -q "$tunnel_name"; then
+                echo "Skipping $domain: No tunnel found"
+                continue
+            fi
+
+            echo "Processing deletion for $domain..."
+
+            # Get tunnel ID
+            local tunnel_id=$(cloudflared tunnel list | grep "$tunnel_name" | awk '{print $1}')
+
+            # Set up zone information for DNS deletion
+            FULL_DOMAIN=$domain
+            if [[ "$domain" =~ ^[^.]+\.[^.]+$ ]]; then
+                CF_ZONE_NAME="$domain"
+            else
+                CF_ZONE_NAME=$(echo "$domain" | cut -d. -f2-)
+            fi
+
+            # Only proceed with DNS cleanup if we have API key and tunnel exists
+            if [ ! -z "$CLOUDFLARE_API_KEY" ]; then
+                CF_ZONE_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$CF_ZONE_NAME" \
+                     -H "Authorization: Bearer $CLOUDFLARE_API_KEY" \
+                     -H "Content-Type: application/json" | jq -r '.result[0].id')
+
+                if [ $? -ne 0 ]; then
+                    echo "Error: Failed to make API request for $domain"
+                    continue
+                fi
+            fi
+
+            # Cleanup existing connections
+            echo "Cleaning up existing connections for $domain..."
+            cloudflared tunnel cleanup "$tunnel_name"
+
+            # Delete the tunnel
+            echo "Deleting tunnel for $domain..."
+            if cloudflared tunnel delete -f "$tunnel_name"; then
+                # Only delete DNS records if tunnel deletion was successful
+                if [ ! -z "$CLOUDFLARE_API_KEY" ]; then
+                    echo "Tunnel deleted successfully, proceeding with DNS cleanup..."
+                    delete_dns_record
+                    wait_for_dns_deletion
+                fi
+                echo "Tunnel for $domain has been deleted."
+            else
+                echo "Failed to delete tunnel for $domain, skipping DNS cleanup."
+            fi
+            echo "----------------------------------------"
+        done
+        echo "Deletion process completed."
+    else
+        echo "Operation cancelled."
+        exit 0
+    fi
+}
+
+# Help and version information
+show_help() {
+    echo "Usage:"
+    echo "  cftun <domain>:<port>              Create tunnel (alternative syntax)"
+    echo "  cftun <domain> <port>              Create tunnel (original syntax)"
+    echo "  cftun list                         List all active tunnels"
+    echo "  cftun delete <domain>              Delete tunnel for specified domain"
+    echo ""
+    echo "Options:"
+    echo "  -h, --help                         Show this help message"
+    echo "  -v, --version                      Show version information"
+    echo ""
+    echo "Examples:"
+    echo "  cftun example.com:8080             Create tunnel for example.com on port 8080"
+    echo "  cftun sub.example.com 3000         Create tunnel for sub.example.com on port 3000"
+    echo "  cftun list                         Show all active tunnels"
+    echo "  cftun delete example.com           Delete tunnel for example.com"
+}
+
+dns_record_exists() {
+    local types=("A" "AAAA" "CNAME")
+    for type in "${types[@]}"; do
+        local record_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=$type&name=$FULL_DOMAIN" \
+             -H "Authorization: Bearer $CLOUDFLARE_API_KEY" \
+             -H "Content-Type: application/json" | jq -r '.result[0].id')
+
+        if [ "$record_id" != "null" ] && [ ! -z "$record_id" ]; then
+            return 0  # Record exists
+        fi
+    done
+    return 1  # No record found
+}
+delete_dns_record() {
+    local records=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?name=$FULL_DOMAIN" \
+         -H "Authorization: Bearer $CLOUDFLARE_API_KEY" \
+         -H "Content-Type: application/json" | jq -r '.result[] | .id')
+
+    if [ ! -z "$records" ]; then
+        echo "Deleting all DNS records for $FULL_DOMAIN..."
+        for record_id in $records; do
+            echo "Deleting record ID: $record_id"
+            curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$record_id" \
+                 -H "Authorization: Bearer $CLOUDFLARE_API_KEY" \
+                 -H "Content-Type: application/json"
+            sleep 1  # Add a small delay between deletions
+        done
+    fi
+}
+
+# Function to wait for DNS record deletion
+wait_for_dns_deletion() {
+    local start_time=$(date +%s)
+    local current_time
+
+    echo "Waiting for DNS record deletion to complete..."
+    while dns_record_exists; do
+        current_time=$(date +%s)
+        if [ $((current_time - start_time)) -ge $MAX_WAIT_TIME ]; then
+            echo "Timeout waiting for DNS record deletion"
+            exit 1
+        fi
+        echo "Still waiting for DNS record deletion... ($(($MAX_WAIT_TIME - $(($current_time - start_time)))) seconds remaining)"
+        sleep 2
+    done
+    echo "DNS record deletion confirmed"
+}
+
+# Function to check if tunnel exists
+tunnel_exists() {
+    cloudflared tunnel list | grep -q "$TUNNEL_NAME"
+    return $?
+}
+
+# Function to wait for tunnel deletion
+wait_for_tunnel_deletion() {
+    local start_time=$(date +%s)
+    local current_time
+
+    echo "Waiting for tunnel deletion to complete..."
+    while tunnel_exists; do
+        current_time=$(date +%s)
+        if [ $((current_time - start_time)) -ge $MAX_WAIT_TIME ]; then
+            echo "Timeout waiting for tunnel deletion"
+            exit 1
+        fi
+        echo "Still waiting for tunnel deletion... ($(($MAX_WAIT_TIME - $(($current_time - start_time)))) seconds remaining)"
+        sleep 2
+    done
+    echo "Tunnel deletion confirmed"
+}
+
+
+
+validate_requirements() {
+    local FULL_DOMAIN=$1
+    local LOCAL_PORT=$2
+
+    local errors=()
+
+    # Validate local port
+    if ! [[ $LOCAL_PORT =~ ^[0-9]+$ ]]; then
+        errors+=("Error: local_port must be a number")
+    elif [ $LOCAL_PORT -lt 1 ] || [ $LOCAL_PORT -gt 65535 ]; then
+        errors+=("Error: local_port must be between 1 and 65535")
+    fi
+
+    # Check API key
+    if [ -z "$CLOUDFLARE_API_KEY" ]; then
+        errors+=("Error: CLOUDFLARE_API_KEY environment variable is not set"
+                "Please set it using: export CLOUDFLARE_API_KEY='your-api-token'")
+    fi
+
+    # Check cloudflared installation
+    if ! command -v cloudflared &> /dev/null; then
+        errors+=("Error: cloudflared is not installed")
+    fi
+
+    # Check cloudflared authentication
+    if [ ! -f "$HOME/.cloudflared/cert.pem" ]; then
+        errors+=("Error: cloudflared not authenticated"
+                "Please authenticate first by running: cloudflared tunnel login")
+    fi
+
+    # Validate Cloudflare zone
+    if [[ "$FULL_DOMAIN" =~ ^[^.]+\.[^.]+$ ]]; then
+        CF_ZONE_NAME="$FULL_DOMAIN"
+    else
+        CF_ZONE_NAME=$(echo "$FULL_DOMAIN" | cut -d. -f2-)
+    fi
+
+    CF_ZONE_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$CF_ZONE_NAME" \
+         -H "Authorization: Bearer $CLOUDFLARE_API_KEY" \
+         -H "Content-Type: application/json" | jq -r '.result[0].id')
+
+    if [ -z "$CF_ZONE_ID" ]; then
+        errors+=("Error: Could not fetch zone data for domain $CF_ZONE_NAME"
+                "Possible issues:"
+                "1. Invalid API token"
+                "2. Domain '$CF_ZONE_NAME' not found in your Cloudflare account"
+                "3. API token doesn't have permission to access this zone")
+    fi
+
+    # If there are any errors, print them and exit
+    if [ ${#errors[@]} -ne 0 ]; then
+        printf '%s\n' "${errors[@]}"
+        return 1
+    fi
+
+    return 0
+}
+
+
+
+create_tunnel() {
+    local FULL_DOMAIN=$1
+    local LOCAL_PORT=$2
+
+    # Validate requirements first
+    if ! validate_requirements "$FULL_DOMAIN" "$LOCAL_PORT"; then
+        exit 1
+    fi
+
+    local TUNNEL_NAME="tunnel_$(echo $FULL_DOMAIN | tr '.' '_')"
+    local CLOUDFLARED_DIR="$HOME/.cloudflared"
+
+    # Handle existing tunnel and DNS cleanup first
+    if tunnel_exists || dns_record_exists; then
+        if tunnel_exists; then
+            echo "Found existing tunnel named $TUNNEL_NAME"
+            echo "Cleaning up existing tunnel..."
+            cloudflared tunnel cleanup "$TUNNEL_NAME"
+            cloudflared tunnel delete -f "$TUNNEL_NAME"
+            wait_for_tunnel_deletion
+        fi
+
+        if dns_record_exists; then
+            echo "Found existing DNS record for $FULL_DOMAIN"
+            delete_dns_record
+            wait_for_dns_deletion
+            echo "Adding additional delay to ensure DNS propagation..."
+        fi
+    fi
+
+    # Create new tunnel
+    echo "Creating new tunnel named $TUNNEL_NAME..."
+    local TUNNEL_ID=$(cloudflared tunnel create "$TUNNEL_NAME" 2>&1 | grep -o '[a-f0-9]\{8\}-[a-f0-9]\{4\}-[a-f0-9]\{4\}-[a-f0-9]\{4\}-[a-f0-9]\{12\}' | head -n 1)
+
+    if [ -z "$TUNNEL_ID" ]; then
+        echo "Failed to create tunnel or capture tunnel ID"
+        exit 1
+    fi
+
+    echo "Tunnel ID: $TUNNEL_ID"
+
+    # Create configuration file
+    local CONFIG_DOMAIN_NAME=$(echo "$FULL_DOMAIN" | tr '.' '_')
+    local CONFIG_FILE="$CLOUDFLARED_DIR/${CONFIG_DOMAIN_NAME}_config.yml"
+
+    echo "Generating configuration file..."
+    cat > "$CONFIG_FILE" << EOF
+url: http://localhost:$LOCAL_PORT
+tunnel: $TUNNEL_ID
+credentials-file: $CLOUDFLARED_DIR/$TUNNEL_ID.json
+EOF
+
+    echo "Config file generated at $CONFIG_FILE"
+    echo "Configuration contents:"
+    cat "$CONFIG_FILE"
+
+    # Create DNS route
+    echo "Creating DNS route..."
+    cloudflared tunnel route dns "$TUNNEL_NAME" "$FULL_DOMAIN"
+
+    # Run the tunnel
+    echo "Starting the tunnel..."
+    echo "Your service will be accessible at https://$FULL_DOMAIN"
+    echo "Press Ctrl+C to stop the tunnel"
+
+    echo "Executing command: cloudflared tunnel --config $CONFIG_FILE run $TUNNEL_NAME --loglevel debug"
+    cloudflared tunnel --config $CONFIG_FILE run $TUNNEL_NAME
+}
+# Main script
+main() {
+
+if [[ "$1" != "-h" && "$1" != "--help" && "$1" != "-v" && "$1" != "--version" ]]; then
+    if ! validate_basic_requirements; then
+        exit 1
+    fi
+fi
+
+    case "$1" in
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        -v|--version)
+            echo "cftun version $VERSION"
+            exit 0
+            ;;
+        list)
+            list_tunnels
+            exit 0
+            ;;
+        delete)
+            if [ -z "$2" ]; then
+                echo "Error: Please specify a domain to delete"
+                echo "Usage: cftun delete <domain>"
+                exit 1
+            fi
+            delete_tunnel "$@"
+            exit 0
+            ;;
+        *)
+            local FULL_DOMAIN
+            local LOCAL_PORT
+
+            # Handle domain:port syntax
+            if [[ "$1" =~ ^([^:]+):([0-9]+)$ ]]; then
+                FULL_DOMAIN="${BASH_REMATCH[1]}"
+                LOCAL_PORT="${BASH_REMATCH[2]}"
+            else
+                # Original syntax check
+                if [ $# -ne 2 ]; then
+                    echo "Error: Invalid arguments"
+                    show_help
+                    exit 1
+                fi
+                FULL_DOMAIN=$1
+                LOCAL_PORT=$2
+            fi
+            create_tunnel "$FULL_DOMAIN" "$LOCAL_PORT"
+            ;;
+    esac
+}
+
+# Run main function
+main "$@"

@@ -2,7 +2,7 @@
 
 # Determine OS
 OS="$(uname)"
-SCRIPT_URL="https://raw.githubusercontent.com/muthuishere/cftun-cli/main/bin/cftun"
+SCRIPT_URL="https://raw.githubusercontent.com/muthuishere/cfex-cli/main/bin/cfex"
 INSTALL_DIR="/usr/local/bin"
 
 # Check for sudo privileges
@@ -28,8 +28,8 @@ check_dependency "jq"
 check_dependency "cloudflared"
 
 # Download and install the script
-echo "Downloading tun script..."
-$SUDO curl -sSL "$SCRIPT_URL" -o "$INSTALL_DIR/tun"
-$SUDO chmod +x "$INSTALL_DIR/tun"
+echo "Downloading cfex script..."
+$SUDO curl -sSL "$SCRIPT_URL" -o "$INSTALL_DIR/cfex"
+$SUDO chmod +x "$INSTALL_DIR/cfex"
 
-echo "Installation completed! You can now use 'tun' command."
+echo "Installation completed! You can now use 'cfex' command."

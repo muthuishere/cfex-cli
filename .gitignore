@@ -1,0 +1,40 @@
+# Bun
+bun.lockb
+node_modules/
+.env
+*.log
+
+# Build output
+dist/
+build/
+out/
+
+# IDE and Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Debug
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Testing
+coverage/
+.nyc_output/
+
+# Examples directory Bun project
+examples/**/node_modules/
+examples/**/.env
+examples/**/bun.lockb
+examples/**/dist/
+examples/**/build/
+examples/**/out/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/

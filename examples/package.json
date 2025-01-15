@@ -1,0 +1,14 @@
+{
+  "name": "multi-site-server",
+  "version": "1.0.0",
+  "description": "Serve multiple sites locally",
+  "scripts": {
+    "serve:site1": "vite site1 --port 8080",
+    "serve:site2": "vite site2 --port 8090",
+    "dev": "concurrently \"bun run serve:site1\" \"bun run serve:site2\""
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0",
+    "vite": "^4.4.0"
+  }
+}

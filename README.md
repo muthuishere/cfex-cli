@@ -1,6 +1,19 @@
-# Cloudflare Tunnel CLI Tool (cftun)
+# cfex - Cloudflare Exposer CLI
 
-A command-line tool for quickly creating and managing Cloudflare Tunnels. Create instant tunnels to expose your local services with HTTPS using Cloudflare.
+A secure command-line tool for exposing local development environments to the internet using Cloudflare's tunneling technology. Instantly create HTTPS endpoints for your local services without port forwarding or static IPs.
+
+## What is cfex?
+
+cfex (Cloudflare Exposer) simplifies the process of creating secure tunnels between your local development environment and the internet. It leverages Cloudflare's tunnel technology to:
+
+- Create instant HTTPS endpoints for local services
+- Share development work with clients or team members
+- Test webhooks on local applications
+- Access local development servers from any device
+- Bypass firewalls and NAT limitations securely
+
+All connections are end-to-end encrypted and don't require opening ports or configuring router settings.
+
 
 ## Platform Support
 
@@ -20,133 +33,122 @@ To set up WSL:
 2. Restart your computer
 3. Follow the Linux installation instructions within your WSL environment
 
-
 ## Prerequisites
 
+Before installing, ensure you have:
 - Cloudflare account with a registered domain
-- `cloudflared` installed
-- `jq` installed
+- `cloudflared` installed ([Installation Guide](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation))
+- `jq` installed (for JSON processing)
 - Cloudflare API token with Zone permissions
 
 ## Installation
 
 ### Using curl (recommended)
 ```bash
-curl -sSL https://raw.githubusercontent.com/muthuishere/cftun-cli/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/muthuishere/cfex-cli/main/install.sh | bash
 ```
 
 ### Manual Installation
 ```bash
-git clone https://github.com/muthuishere/cftun-cli.git
-cd cftun-cli
+git clone https://github.com/muthuishere/cfex-cli.git
+cd cfex-cli
 chmod +x install.sh
 ./install.sh
 ```
 
-## Setup Cloudflare API Token
+## Setup
 
-1. Log in to your [Cloudflare Dashboard](https://dash.cloudflare.com)
-2. Click on your profile icon and select "My Profile"
-3. Navigate to "API Tokens" in the left sidebar
-4. Click "Create Token"
-5. Select "Create Custom Token"
-6. Set the following permissions:
+### 1. Create Cloudflare API Token
+
+1. Visit [Cloudflare Dashboard](https://dash.cloudflare.com) → Profile → API Tokens
+2. Click "Create Token"
+3. Choose "Create Custom Token"
+4. Configure permissions:
    - Zone - DNS - Edit
    - Zone - Zone - Read
-7. Under "Zone Resources", select:
-   - Include - All Zones (or specific zones you want to manage)
-8. Give your token a name (e.g., "CFTUN CLI Token")
-9. Click "Continue to summary" and then "Create Token"
-10. Copy the generated token
+5. Set Zone Resources:
+   - Include - All Zones (or specific zones)
+6. Name your token (e.g., "cfex CLI Token")
+7. Create and copy the token
 
-## Configuration
+### 2. Configure Environment
 
-Set your Cloudflare API token as an environment variable:
+Set your API token:
 
 ```bash
 export CLOUDFLARE_API_KEY='your-api-token'
 ```
 
-For permanent configuration, add this to your shell profile (~/.bashrc, ~/.zshrc, etc.):
-
+For permanent configuration:
 ```bash
-echo 'export CLOUDFLARE_API_KEY="your-api-token"' >> ~/.bashrc
-source ~/.bashrc
+echo 'export CLOUDFLARE_API_KEY="your-api-token"' >> ~/.bashrc  # or ~/.zshrc
+source ~/.bashrc  # or source ~/.zshrc
 ```
 
 ## Usage
 
-### Basic Command
+### Basic Commands
+
 ```bash
-cftun <full_domain> <local_port>
+# Create tunnel (Format 1)
+cfex <domain> <port>
+
+# Create tunnel (Format 2)
+cfex <domain>:<port>
+
+# List tunnels
+cfex list
+
+# Delete tunnel
+cfex delete <domain>
+
+# Show help
+cfex --help
 ```
 
-### Example
+### Examples
+
 ```bash
-# Expose local port 3000 at mydomain.example.com
-cftun mydomain.example.com 3000
+# Expose React dev server
+cfex app.yourdomain.com 3000
+
+# Share local API
+cfex api.yourdomain.com:8080
+
+# Test webhooks
+cfex webhook.yourdomain.com 4000
+
+# Delete multiple tunnels
+cfex delete app.yourdomain.com api.yourdomain.com
 ```
 
-### Common Use Cases
+### Features
 
-1. Expose a React development server:
-```bash
-cftun dev.yourdomain.com 3000
-```
-
-2. Share a local API:
-```bash
-cftun api.yourdomain.com 8080
-```
-
-3. Test webhooks locally:
-```bash
-cftun webhook.yourdomain.com 4000
-```
-
-The tool will:
-1. Create a new tunnel
-2. Configure DNS records
-3. Start the tunnel
-4. Clean up resources when stopped (Ctrl+C)
+- Automatic tunnel creation and configuration
+- DNS record management
+- Clean resource cleanup on exit (Ctrl+C)
+- Support for multiple domains
+- Easy listing and deletion of tunnels
 
 ## Troubleshooting
 
-### Common Issues
+### Common Issues & Solutions
 
-1. **"Error: cloudflared is not installed"**
-   - Install cloudflared following [official instructions](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation)
+1. **Installation Issues**
+   - Verify prerequisites are installed (`cloudflared`, `jq`)
+   - Ensure proper permissions for installation directory
 
-2. **"Authentication failed"**
-   - Verify your CLOUDFLARE_API_KEY is set correctly
-   - Ensure the API token has correct permissions
+2. **Authentication Issues**
+   - Verify `CLOUDFLARE_API_KEY` is correctly set
+   - Confirm API token permissions
    - Run `cloudflared tunnel login` if needed
 
-3. **"DNS record already exists"**
-   - The tool will automatically clean up existing records
-   - If persists, manually delete the DNS record from Cloudflare dashboard
+3. **DNS Issues**
+   - Allow time for DNS propagation
+   - Check domain ownership in Cloudflare
+   - Verify zone permissions
 
-4. **"Port already in use"**
-   - Ensure the local port is not being used by another application
-   - Try a different port number
-
-## Security Considerations
-
-- Keep your API token secure and never commit it to version control
-- Use separate API tokens for different environments/purposes
-- Regularly rotate your API tokens
-- Always use the minimum required permissions for API tokens
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## License
-
-MIT
-
-## Support
-
-- Create an [issue](https://github.com/muthuishere/cftun-cli/issues) for bug reports
-- Star the repository if you find it useful
-- Follow [@muthuishere](https://twitter.com/muthuishere) for updates
+4. **Connection Issues**
+   - Ensure local service is running
+   - Check port availability
+   - Verify firewall settings
