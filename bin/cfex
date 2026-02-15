@@ -202,20 +202,31 @@ delete_tunnel() {
 # Help and version information
 show_help() {
     echo "Usage:"
-    echo "  cfex <domain>:<port>              Create tunnel (alternative syntax)"
-    echo "  cfex <domain> <port>              Create tunnel (original syntax)"
-    echo "  cfex list                         List all active tunnels"
-    echo "  cfex delete <domain>              Delete tunnel for specified domain"
+    echo "  cfex <domain>:<port>                      Auto-detect HTTP/HTTPS and create tunnel"
+    echo "  cfex <domain>:<port> --https              Force HTTPS mode for local service"
+    echo "  cfex <domain>:<port> --https --verify-cert Force HTTPS with cert verification"
+    echo "  cfex <domain> <port>                      Auto-detect HTTP/HTTPS (original syntax)"
+    echo "  cfex <domain> <port> --https              Force HTTPS mode"
+    echo "  cfex list                                 List all active tunnels"
+    echo "  cfex delete <domain>                      Delete tunnel for specified domain"
     echo ""
     echo "Options:"
-    echo "  -h, --help                         Show this help message"
-    echo "  -v, --version                      Show version information"
+    echo "  --https                                   Force HTTPS mode for local service"
+    echo "  --verify-cert                             Verify SSL certificates (default: ignore cert errors)"
+    echo "  -h, --help                                Show this help message"
+    echo "  -v, --version                             Show version information"
     echo ""
     echo "Examples:"
-    echo "  cfex example.com:8080             Create tunnel for example.com on port 8080"
-    echo "  cfex sub.example.com 3000         Create tunnel for sub.example.com on port 3000"
-    echo "  cfex list                         Show all active tunnels"
-    echo "  cfex delete example.com           Delete tunnel for example.com"
+    echo "  cfex example.com:8080                     Auto-detect if port 8080 is HTTP/HTTPS"
+    echo "  cfex example.com:8443 --https             Force HTTPS tunnel for port 8443"
+    echo "  cfex sub.example.com:3000 --https --verify-cert  HTTPS tunnel with cert verification"
+    echo "  cfex api.example.com 8080                 Auto-detect protocol for port 8080"
+    echo "  cfex list                                 Show all active tunnels"
+    echo "  cfex delete example.com                   Delete tunnel for example.com"
+    echo ""
+    echo "Note: The tool automatically detects if your local service is HTTP or HTTPS."
+    echo "Certificate errors are ignored by default for easier local development."
+    echo "Use --verify-cert if you need strict certificate validation."
 }
 
 dns_record_exists() {
@@ -355,6 +366,8 @@ validate_requirements() {
 create_tunnel() {
     local FULL_DOMAIN=$1
     local LOCAL_PORT=$2
+    local PROTOCOL=${3:-"http"}  # Default to http
+    local IGNORE_CERT=${4:-"true"}  # Default to true (ignore cert errors)
 
     # Validate requirements first
     if ! validate_requirements "$FULL_DOMAIN" "$LOCAL_PORT"; then
@@ -362,24 +375,102 @@ create_tunnel() {
     fi
 
     local TUNNEL_NAME="tunnel_$(echo $FULL_DOMAIN | tr '.' '_')"
-    local CLOUDFLARED_DIR="$HOME/.cloudflared"
+    local CONFIG_DOMAIN_NAME=$(echo "$FULL_DOMAIN" | tr '.' '_')
+    local CONFIG_FILE="$CLOUDFLARED_DIR/${CONFIG_DOMAIN_NAME}_config.yml"
 
-    # Handle existing tunnel and DNS cleanup first
-    if tunnel_exists || dns_record_exists; then
-        if tunnel_exists; then
-            echo "Found existing tunnel named $TUNNEL_NAME"
-            echo "Cleaning up existing tunnel..."
-            cloudflared tunnel cleanup "$TUNNEL_NAME"
-            cloudflared tunnel delete -f "$TUNNEL_NAME"
-            wait_for_tunnel_deletion
+    # Check if tunnel already exists — if so, just update config and run
+    if tunnel_exists; then
+        echo "Found existing tunnel named $TUNNEL_NAME"
+
+        # Get existing tunnel ID
+        local TUNNEL_ID=$(cloudflared tunnel list --output json | jq -r --arg name "$TUNNEL_NAME" '.[] | select(.name == $name) | .id')
+        if [ -z "$TUNNEL_ID" ]; then
+            echo "Error: Could not retrieve tunnel ID for $TUNNEL_NAME"
+            exit 1
+        fi
+        echo "Tunnel ID: $TUNNEL_ID"
+
+        # Cleanup any stale connections before re-running
+        echo "Cleaning up stale connections..."
+        cloudflared tunnel cleanup "$TUNNEL_NAME" 2>/dev/null
+
+        # Auto-detect protocol
+        local detected_protocol="http"
+        echo "Detecting local service protocol on port $LOCAL_PORT..."
+        if timeout 3 openssl s_client -connect localhost:$LOCAL_PORT -servername localhost </dev/null >/dev/null 2>&1; then
+            detected_protocol="https"
+            echo "✓ Detected HTTPS service on port $LOCAL_PORT"
+        elif timeout 3 curl -s -k https://localhost:$LOCAL_PORT >/dev/null 2>&1; then
+            detected_protocol="https"
+            echo "✓ Detected HTTPS service on port $LOCAL_PORT (via curl)"
+        else
+            echo "✓ Detected HTTP service on port $LOCAL_PORT"
+        fi
+        if [ "$PROTOCOL" = "http" ] && [ "$detected_protocol" = "https" ]; then
+            PROTOCOL="https"
+            echo "→ Automatically switching to HTTPS mode for HTTPS service"
         fi
 
-        if dns_record_exists; then
-            echo "Found existing DNS record for $FULL_DOMAIN"
-            delete_dns_record
-            wait_for_dns_deletion
-            echo "Adding additional delay to ensure DNS propagation..."
+        # Update config file with new port/protocol
+        echo "Updating config file with port $LOCAL_PORT..."
+        if [ "$PROTOCOL" = "https" ]; then
+            if [ "$IGNORE_CERT" = "true" ]; then
+                cat > "$CONFIG_FILE" << EOF
+url: https://localhost:$LOCAL_PORT
+tunnel: $TUNNEL_ID
+credentials-file: $CLOUDFLARED_DIR/$TUNNEL_ID.json
+originRequest:
+  noTLSVerify: true
+  disableChunkedEncoding: true
+EOF
+            else
+                cat > "$CONFIG_FILE" << EOF
+url: https://localhost:$LOCAL_PORT
+tunnel: $TUNNEL_ID
+credentials-file: $CLOUDFLARED_DIR/$TUNNEL_ID.json
+originRequest:
+  disableChunkedEncoding: true
+EOF
+            fi
+        else
+            cat > "$CONFIG_FILE" << EOF
+url: http://localhost:$LOCAL_PORT
+tunnel: $TUNNEL_ID
+credentials-file: $CLOUDFLARED_DIR/$TUNNEL_ID.json
+EOF
         fi
+
+        echo "Config file updated at $CONFIG_FILE"
+        echo "Configuration contents:"
+        cat "$CONFIG_FILE"
+
+        # Run the tunnel directly — DNS route already exists
+        echo "Starting the tunnel..."
+        echo "Your service will be accessible at https://$FULL_DOMAIN"
+        if [ "$PROTOCOL" = "https" ]; then
+            echo "→ Tunneling HTTPS traffic from localhost:$LOCAL_PORT"
+            if [ "$IGNORE_CERT" = "true" ]; then
+                echo "→ SSL certificate verification is disabled for local HTTPS service"
+            else
+                echo "→ SSL certificate verification is enabled"
+            fi
+        else
+            echo "→ Tunneling HTTP traffic from localhost:$LOCAL_PORT"
+        fi
+        echo "Press Ctrl+C to stop the tunnel"
+
+        echo "Executing command: cloudflared tunnel --config $CONFIG_FILE run $TUNNEL_NAME"
+        cloudflared tunnel --config $CONFIG_FILE run $TUNNEL_NAME
+        return
+    fi
+
+    # Handle orphaned DNS records (tunnel gone but DNS still exists)
+    if dns_record_exists; then
+        echo "Found existing DNS record for $FULL_DOMAIN (no matching tunnel)"
+        delete_dns_record
+        wait_for_dns_deletion
+        echo "Adding additional delay to ensure DNS propagation..."
+        sleep 5
     fi
 
     # Create new tunnel
@@ -393,16 +484,58 @@ create_tunnel() {
 
     echo "Tunnel ID: $TUNNEL_ID"
 
-    # Create configuration file
-    local CONFIG_DOMAIN_NAME=$(echo "$FULL_DOMAIN" | tr '.' '_')
-    local CONFIG_FILE="$CLOUDFLARED_DIR/${CONFIG_DOMAIN_NAME}_config.yml"
-
     echo "Generating configuration file..."
-    cat > "$CONFIG_FILE" << EOF
+    
+    # Auto-detect if local service is HTTPS by attempting a connection
+    local detected_protocol="http"
+    echo "Detecting local service protocol on port $LOCAL_PORT..."
+    
+    # Try to detect if the service is HTTPS by checking if it responds to HTTPS
+    if timeout 3 openssl s_client -connect localhost:$LOCAL_PORT -servername localhost </dev/null >/dev/null 2>&1; then
+        detected_protocol="https"
+        echo "✓ Detected HTTPS service on port $LOCAL_PORT"
+    elif timeout 3 curl -s -k https://localhost:$LOCAL_PORT >/dev/null 2>&1; then
+        detected_protocol="https" 
+        echo "✓ Detected HTTPS service on port $LOCAL_PORT (via curl)"
+    else
+        echo "✓ Detected HTTP service on port $LOCAL_PORT"
+    fi
+    
+    # Use detected protocol if not explicitly specified
+    if [ "$PROTOCOL" = "http" ] && [ "$detected_protocol" = "https" ]; then
+        PROTOCOL="https"
+        echo "→ Automatically switching to HTTPS mode for HTTPS service"
+    fi
+    
+    # Build the configuration based on detected/specified protocol
+    if [ "$PROTOCOL" = "https" ]; then
+        echo "Configuring for HTTPS backend service..."
+        if [ "$IGNORE_CERT" = "true" ]; then
+            cat > "$CONFIG_FILE" << EOF
+url: https://localhost:$LOCAL_PORT
+tunnel: $TUNNEL_ID
+credentials-file: $CLOUDFLARED_DIR/$TUNNEL_ID.json
+originRequest:
+  noTLSVerify: true
+  disableChunkedEncoding: true
+EOF
+        else
+            cat > "$CONFIG_FILE" << EOF
+url: https://localhost:$LOCAL_PORT
+tunnel: $TUNNEL_ID
+credentials-file: $CLOUDFLARED_DIR/$TUNNEL_ID.json
+originRequest:
+  disableChunkedEncoding: true
+EOF
+        fi
+    else
+        echo "Configuring for HTTP backend service..."
+        cat > "$CONFIG_FILE" << EOF
 url: http://localhost:$LOCAL_PORT
 tunnel: $TUNNEL_ID
 credentials-file: $CLOUDFLARED_DIR/$TUNNEL_ID.json
 EOF
+    fi
 
     echo "Config file generated at $CONFIG_FILE"
     echo "Configuration contents:"
@@ -410,11 +543,30 @@ EOF
 
     # Create DNS route
     echo "Creating DNS route..."
-    cloudflared tunnel route dns "$TUNNEL_NAME" "$FULL_DOMAIN"
+    if ! cloudflared tunnel route dns "$TUNNEL_NAME" "$FULL_DOMAIN" 2>&1; then
+        echo "Warning: DNS route creation failed. This might be because:"
+        echo "1. The DNS record already exists and wasn't properly cleaned up"
+        echo "2. DNS propagation is still in progress"
+        echo "Attempting to continue with tunnel startup..."
+        echo "If the tunnel doesn't work, try running the command again in a few minutes."
+        sleep 3
+    else
+        echo "DNS route created successfully."
+    fi
 
     # Run the tunnel
     echo "Starting the tunnel..."
     echo "Your service will be accessible at https://$FULL_DOMAIN"
+    if [ "$PROTOCOL" = "https" ]; then
+        echo "→ Tunneling HTTPS traffic from localhost:$LOCAL_PORT"
+        if [ "$IGNORE_CERT" = "true" ]; then
+            echo "→ SSL certificate verification is disabled for local HTTPS service"
+        else
+            echo "→ SSL certificate verification is enabled"
+        fi
+    else
+        echo "→ Tunneling HTTP traffic from localhost:$LOCAL_PORT"
+    fi
     echo "Press Ctrl+C to stop the tunnel"
 
     echo "Executing command: cloudflared tunnel --config $CONFIG_FILE run $TUNNEL_NAME --loglevel debug"
@@ -454,22 +606,48 @@ fi
         *)
             local FULL_DOMAIN
             local LOCAL_PORT
+            local PROTOCOL="http"
+            local IGNORE_CERT="true"  # Default to true (ignore cert errors)
+            
+            # Parse arguments for protocol and cert verification options
+            local args=("$@")
+            for i in "${!args[@]}"; do
+                case "${args[i]}" in
+                    --https)
+                        PROTOCOL="https"
+                        unset args[i]
+                        ;;
+                    --verify-cert)
+                        IGNORE_CERT="false"
+                        unset args[i]
+                        ;;
+                esac
+            done
+            
+            # Rebuild args array without the flags
+            local clean_args=()
+            for arg in "${args[@]}"; do
+                if [ -n "$arg" ]; then
+                    clean_args+=("$arg")
+                fi
+            done
 
             # Handle domain:port syntax
-            if [[ "$1" =~ ^([^:]+):([0-9]+)$ ]]; then
+            if [[ "${clean_args[0]}" =~ ^([^:]+):([0-9]+)$ ]]; then
                 FULL_DOMAIN="${BASH_REMATCH[1]}"
                 LOCAL_PORT="${BASH_REMATCH[2]}"
             else
                 # Original syntax check
-                if [ $# -ne 2 ]; then
+                if [ ${#clean_args[@]} -ne 2 ]; then
                     echo "Error: Invalid arguments"
                     show_help
                     exit 1
                 fi
-                FULL_DOMAIN=$1
-                LOCAL_PORT=$2
+                FULL_DOMAIN="${clean_args[0]}"
+                LOCAL_PORT="${clean_args[1]}"
             fi
-            create_tunnel "$FULL_DOMAIN" "$LOCAL_PORT"
+            
+            create_tunnel "$FULL_DOMAIN" "$LOCAL_PORT" "$PROTOCOL" "$IGNORE_CERT"
             ;;
     esac
 }
