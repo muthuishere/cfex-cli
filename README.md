@@ -1,4 +1,5 @@
 # cfex - Cloudflare Exposer CLI
+[![Discord](https://img.shields.io/badge/AgentNexus-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/V9C2kvHC8D)
 
 Expose your local services to the internet using your domain names via Cloudflare's tunneling technology. With cfex, you can create instant HTTPS endpoints for any local service without port forwarding or static IPs.
 
@@ -136,3 +137,8 @@ cfex --help
 - **cloudflared**: The native client that cfex simplifies.
 
 cfex provides a streamlined solution for exposing your local services using Cloudflare, making it ideal for developers working with custom domains and secure tunnels.
+
+## Community
+
+Questions, ideas, or built something with this? Join **[AgentNexus](https://discord.gg/V9C2kvHC8D)** — a Discord
+for people building with AI agents and open tools. This project lives in **#cfex-cli**.
