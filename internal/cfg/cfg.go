@@ -13,6 +13,8 @@ import (
 type Route struct {
 	Host      string `yaml:"host"`
 	Port      int    `yaml:"port"`
+	HTTPS     bool   `yaml:"https,omitempty"`
+	VerifyTLS bool   `yaml:"verify_tls,omitempty"`
 	Zone      string `yaml:"zone"`
 	ZoneID    string `yaml:"zone_id"`
 	DNSID     string `yaml:"dns_id"`
@@ -38,34 +40,29 @@ type Config struct {
 	TunnelName string `yaml:"tunnel_name"`
 	TunnelID   string `yaml:"tunnel_id,omitempty"`
 
-	// TokenEnv is the environment variable holding the Cloudflare API token (default CLOUDFLARE_API_TOKEN;
-	// CLOUDFLARE_API_KEY is accepted for compatibility with cfex v1).
+	// The Cloudflare API token is OPTIONAL: cfex drives cloudflared for tunnels and DNS routes. The token only adds
+	// DNS ownership checks (the managed-by comment), deleting DNS records and reading remote ingress.
+	// TokenEnv is the environment variable holding it (default CLOUDFLARE_API_TOKEN; CLOUDFLARE_API_KEY also works).
 	TokenEnv string `yaml:"token_env,omitempty"`
 	// TokenCmd is an optional command prefix that cfex re-executes itself under so the token only ever lives in
 	// the child's environment, e.g. "op run --" or "sec run CLOUDFLARE_TOKEN --". It must export TokenEnv.
 	TokenCmd string `yaml:"token_cmd,omitempty"`
 
-	// ServiceLabel is the launchd label / systemd unit name of the connector for the durable tunnel.
-	ServiceLabel string `yaml:"service_label,omitempty"`
-	// Connector token handling for the durable tunnel. Default: a 0600 token file under the state dir.
-	// Or keep it in a secret manager: ConnectorRunCmd wraps the connector ("sec run MYTOKEN --"), ConnectorEnv
-	// names the variable it exports, ConnectorSetCmd stores a value read from stdin ("sec set MYTOKEN").
-	ConnectorRunCmd string `yaml:"connector_run_cmd,omitempty"`
-	ConnectorEnv    string `yaml:"connector_env,omitempty"`
-	ConnectorSetCmd string `yaml:"connector_set_cmd,omitempty"`
-
-	Protected []string  `yaml:"protected,omitempty"` // tunnel-name globs that cfex never modifies
-	Client    []string  `yaml:"client,omitempty"`    // tunnel-name globs listed as "client": never modified
-	Routes    []Route   `yaml:"routes"`
-	Adopted   []Adopted `yaml:"adopted"`
+	// ServiceLabel is the launchd label / systemd unit name that keeps the durable tunnel running.
+	ServiceLabel string    `yaml:"service_label,omitempty"`
+	Protected    []string  `yaml:"protected,omitempty"` // tunnel-name globs that cfex never modifies
+	Client       []string  `yaml:"client,omitempty"`    // tunnel-name globs listed as "client": never modified
+	Routes       []Route   `yaml:"routes"`
+	Adopted      []Adopted `yaml:"adopted"`
 }
 
 func Default() *Config {
 	return &Config{TunnelName: "cfex", TokenEnv: "CLOUDFLARE_API_TOKEN", ServiceLabel: "dev.cfex.tunnel"}
 }
 
-func Dir() string      { h, _ := os.UserHomeDir(); return filepath.Join(h, ".config", "cfex") }
-func StateDir() string { h, _ := os.UserHomeDir(); return filepath.Join(h, ".local", "share", "cfex") }
+func Dir() string        { h, _ := os.UserHomeDir(); return filepath.Join(h, ".config", "cfex") }
+func TunnelFile() string { return filepath.Join(Dir(), "tunnel.yml") }
+func StateDir() string   { h, _ := os.UserHomeDir(); return filepath.Join(h, ".local", "share", "cfex") }
 func Path() string {
 	if p := os.Getenv("CFEX_CONFIG"); p != "" {
 		return p
@@ -97,15 +94,27 @@ func Load() (*Config, error) {
 	return c, nil
 }
 
-// UnderTemp reports whether path lives inside the OS temp dir (symlinks resolved).
-func UnderTemp(path string) bool {
-	real := func(p string) string {
+// resolve evaluates symlinks on the deepest existing ancestor and re-appends the missing tail, so paths that do
+// not exist yet compare correctly (on macOS /var is a symlink to /private/var).
+func resolve(p string) string {
+	p = filepath.Clean(p)
+	tail := ""
+	for {
 		if r, err := filepath.EvalSymlinks(p); err == nil {
-			return r
+			return filepath.Join(r, tail)
 		}
-		return p
+		parent := filepath.Dir(p)
+		if parent == p {
+			return filepath.Join(p, tail)
+		}
+		tail = filepath.Join(filepath.Base(p), tail)
+		p = parent
 	}
-	rel, err := filepath.Rel(real(os.TempDir()), real(filepath.Dir(path)))
+}
+
+// UnderTemp reports whether path lives inside the OS temp dir.
+func UnderTemp(path string) bool {
+	rel, err := filepath.Rel(resolve(os.TempDir()), resolve(filepath.Dir(path)))
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 

@@ -10,69 +10,19 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/muthuishere/cfex-cli/internal/cf"
+	"github.com/muthuishere/cfex-cli/internal/cfd"
 	"github.com/muthuishere/cfex-cli/internal/cfg"
 )
 
-// The durable connector for cfex's own tunnel runs as a launchd agent (macOS) or a systemd user unit (Linux).
-// The connector token is never written into the unit: it is read from a 0600 file (default) or handed over
-// by the configured secret manager at start time.
-
-func tokenFilePath() string { return filepath.Join(cfg.StateDir(), "connector.token") }
+// The durable tunnel runs as a launchd agent (macOS) or a systemd user unit (Linux): `cloudflared tunnel --config
+// ~/.config/cfex/tunnel.yml run <name>`. It uses cloudflared's own credentials file, so no token is ever written into the unit.
 
 func connectorArgs(c *cfg.Config) ([]string, error) {
-	cfd, err := exec.LookPath("cloudflared")
-	if err != nil {
-		return nil, fmt.Errorf("cloudflared not installed (https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)")
-	}
-	if strings.TrimSpace(c.ConnectorRunCmd) == "" {
-		return []string{cfd, "tunnel", "--no-autoupdate", "run", "--token-file", tokenFilePath()}, nil
-	}
-	if c.ConnectorEnv == "" {
-		return nil, fmt.Errorf("connector_run_cmd needs connector_env (the variable it exports)")
-	}
-	pre := strings.Fields(c.ConnectorRunCmd)
-	bin, err := exec.LookPath(pre[0])
+	bin, err := cfd.Bin()
 	if err != nil {
 		return nil, err
 	}
-	inner := fmt.Sprintf(`TUNNEL_TOKEN="$%s" exec %s tunnel --no-autoupdate run`, c.ConnectorEnv, cfd)
-	return append(append([]string{bin}, pre[1:]...), "/bin/sh", "-c", inner), nil
-}
-
-// storeToken keeps the connector token where the service can read it, never printing it.
-func storeToken(c *cfg.Config, cl *cf.Client, fresh bool) error {
-	if strings.TrimSpace(c.ConnectorRunCmd) == "" {
-		if _, err := os.Stat(tokenFilePath()); err == nil && !fresh {
-			return nil
-		}
-		tok, err := cl.TunnelToken(c.AccountID, c.TunnelID)
-		if err != nil {
-			return err
-		}
-		if err := os.MkdirAll(cfg.StateDir(), 0o700); err != nil {
-			return err
-		}
-		return os.WriteFile(tokenFilePath(), []byte(tok), 0o600)
-	}
-	if !fresh {
-		return nil
-	}
-	if strings.TrimSpace(c.ConnectorSetCmd) == "" {
-		return fmt.Errorf("connector_run_cmd is set but connector_set_cmd is not: cannot store the new connector token")
-	}
-	tok, err := cl.TunnelToken(c.AccountID, c.TunnelID)
-	if err != nil {
-		return err
-	}
-	f := strings.Fields(c.ConnectorSetCmd)
-	cmd := exec.Command(f[0], f[1:]...)
-	cmd.Stdin = strings.NewReader(tok)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("connector_set_cmd failed: %v: %s", err, strings.ReplaceAll(string(out), tok, "[redacted]"))
-	}
-	fmt.Println("connector token stored via connector_set_cmd")
-	return nil
+	return []string{bin, "tunnel", "--no-autoupdate", "--config", cfg.TunnelFile(), "run", c.TunnelName}, nil
 }
 
 func plistPath(c *cfg.Config) string {
@@ -112,7 +62,7 @@ func serviceBody(c *cfg.Config, args []string) string {
 	for i, x := range args {
 		q[i] = "'" + strings.ReplaceAll(x, "'", `'\''`) + "'"
 	}
-	return fmt.Sprintf("[Unit]\nDescription=cfex tunnel connector\nAfter=network-online.target\n\n[Service]\nExecStart=%s\nRestart=always\nRestartSec=5\nStandardOutput=append:%s\nStandardError=append:%s\n\n[Install]\nWantedBy=default.target\n",
+	return fmt.Sprintf("[Unit]\nDescription=cfex tunnel\nAfter=network-online.target\n\n[Service]\nExecStart=%s\nRestart=always\nRestartSec=5\nStandardOutput=append:%s\nStandardError=append:%s\n\n[Install]\nWantedBy=default.target\n",
 		strings.Join(q, " "), logp, logp)
 }
 
@@ -143,6 +93,18 @@ func serviceStop(c *cfg.Config) error {
 		return exec.Command("launchctl", "bootout", domain()+"/"+c.ServiceLabel).Run()
 	}
 	return exec.Command("systemctl", "--user", "stop", c.ServiceLabel+".service").Run()
+}
+
+// serviceReload makes cloudflared pick up a changed tunnel.yml (it does not hot-reload local config): a restart,
+// so every route on the durable tunnel reconnects for a second or two.
+func serviceReload(c *cfg.Config) error {
+	if !serviceLoaded(c) {
+		return installService(c)
+	}
+	if runtime.GOOS == "darwin" {
+		return exec.Command("launchctl", "kickstart", "-k", domain()+"/"+c.ServiceLabel).Run()
+	}
+	return exec.Command("systemctl", "--user", "restart", c.ServiceLabel+".service").Run()
 }
 
 // installService writes the unit (idempotent) and starts it.

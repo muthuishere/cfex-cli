@@ -36,21 +36,22 @@ func stopStart(c *cfg.Config, args []string, start bool) error {
 		if r.Protected && !forced() {
 			return fmt.Errorf("%s is a protected route: %s needs an explicit decision (set CFEX_FORCE=1)", host, verb)
 		}
-		cl, err := client(c)
-		if err != nil {
-			return err
-		}
-		acct, err := pickAccount(c, cl)
-		if err != nil {
-			return err
-		}
-		full, rules, err := cl.TunnelConfig(acct, r.TunnelID)
+		rules, err := loadRules()
 		if err != nil {
 			return err
 		}
 		var next []ingress.Rule
 		if start {
-			next, err = ingress.Add(rules, host, fmt.Sprintf("http://127.0.0.1:%d", r.Port))
+			next, err = ingress.Add(rules, host, serviceURL(r.HTTPS, r.Port))
+			if err == nil {
+				for _, x := range next {
+					if h, _ := x["hostname"].(string); h == host {
+						for k, v := range routeRule(host, serviceURL(r.HTTPS, r.Port), r.HTTPS, r.VerifyTLS) {
+							x[k] = v
+						}
+					}
+				}
+			}
 			if err == ingress.ErrExists {
 				r.State = "running"
 				return c.Save()
@@ -65,12 +66,18 @@ func stopStart(c *cfg.Config, args []string, start bool) error {
 		if err != nil {
 			return err
 		}
-		if err := cl.PutIngress(acct, r.TunnelID, full, next); err != nil {
+		if err := saveRules(c.TunnelID, next); err != nil {
 			return err
 		}
 		r.State = map[bool]string{true: "running", false: "stopped"}[start]
+		if err := c.Save(); err != nil {
+			return err
+		}
+		if err := serviceReload(c); err != nil {
+			return err
+		}
 		fmt.Printf("%s: %s\n", host, r.State)
-		return c.Save()
+		return nil
 	}
 	for _, a := range c.Adopted {
 		if a.Tunnel == target || a.Label == target {

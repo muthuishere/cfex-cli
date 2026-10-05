@@ -153,3 +153,8 @@ func (c *Client) DNSCreate(zone string, d DNS) (out DNS, err error) {
 func (c *Client) DNSDelete(zone, id string) error {
 	return c.do("DELETE", "/zones/"+zone+"/dns_records/"+id, nil, nil)
 }
+
+// DNSSetComment stamps a comment on an existing record (cloudflared cannot).
+func (c *Client) DNSSetComment(zone, id, comment string) error {
+	return c.do("PATCH", "/zones/"+zone+"/dns_records/"+id, map[string]any{"comment": comment}, nil)
+}

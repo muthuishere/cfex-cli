@@ -4,9 +4,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 
+	"github.com/muthuishere/cfex-cli/internal/cfd"
 	"github.com/muthuishere/cfex-cli/internal/cfg"
 	"github.com/muthuishere/cfex-cli/internal/disc"
 	"github.com/muthuishere/cfex-cli/internal/ingress"
@@ -23,19 +23,6 @@ func cmdStatus(c *cfg.Config, args []string) error {
 	}
 	fmt.Printf("routes      %d (%d stopped)\n", len(c.Routes), n)
 	fmt.Printf("cloudflared %d processes on this machine\n", disc.RunningCloudflaredCount())
-	if c.TunnelID != "" {
-		if cl, err := client(c); err == nil {
-			if acct, err := pickAccount(c, cl); err == nil {
-				if ts, err := cl.Tunnels(acct); err == nil {
-					for _, t := range ts {
-						if t.ID == c.TunnelID {
-							fmt.Printf("api         %s, %d connections\n", t.Status, len(t.Connections))
-						}
-					}
-				}
-			}
-		}
-	}
 	return nil
 }
 
@@ -45,6 +32,12 @@ func orDash(s string) string {
 	}
 	return s
 }
+
+const tokenHelp = `Create an API token at https://dash.cloudflare.com/profile/api-tokens
+  1. Click 'Create Token' and use the 'Edit zone DNS' template
+  2. Under 'Zone Resources' choose 'Include Specific Zone' and pick your domain
+  3. Export it: export CLOUDFLARE_API_TOKEN='your-api-token'  (CLOUDFLARE_API_KEY also works)
+  For persistence, add that line to ~/.zshrc or ~/.bashrc.`
 
 func cmdDoctor(c *cfg.Config, args []string) error {
 	bad := 0
@@ -56,36 +49,39 @@ func cmdDoctor(c *cfg.Config, args []string) error {
 		}
 		fmt.Printf("[%s] %s %s\n", m, what, detail)
 	}
-	if p, err := exec.LookPath("cloudflared"); err == nil {
-		v, _ := exec.Command(p, "--version").Output()
-		check(true, "cloudflared installed", strings.TrimSpace(string(v)))
-	} else {
-		check(false, "cloudflared installed", "see https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/")
-	}
-	cl, cerr := client(c)
+	_, cerr := cfd.Bin()
+	check(cerr == nil, "cloudflared installed", cfd.Version())
 	if cerr != nil {
-		check(false, "Cloudflare API token available", cerr.Error())
-		return fmt.Errorf("%d check(s) failed", bad)
+		fmt.Println("       install: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/")
 	}
-	check(true, "Cloudflare API token available", "")
-	acct, aerr := pickAccount(c, cl)
-	check(aerr == nil, "Cloudflare account reachable", fmt.Sprint(aerr))
+	login := cfd.HasCert()
+	check(login, "cloudflared logged in (needed for: instant tunnels, add, list, delete)", cfd.CertPath())
+	if !login {
+		fmt.Println("       fix: cloudflared tunnel login   (pick the domain you want to tunnel)")
+	}
+	api := apiClient(c)
+	if api == nil {
+		fmt.Println("[info] no API token (optional). Without it cfex cannot: verify/stamp DNS ownership, delete DNS records, read remote ingress, validate zones.")
+		fmt.Println(indent(tokenHelp))
+	} else {
+		_, err := pickAccount(c, api)
+		check(err == nil, "Cloudflare API token works (enables DNS ownership checks, DNS deletion, remote ingress)", errString(err))
+	}
 	if c.TunnelID == "" {
-		fmt.Println("[info] cfex's own tunnel is created on the first `cfex add`")
-	} else if aerr == nil {
+		fmt.Println("[info] cfex's durable tunnel is created on the first `cfex add`")
+	} else {
 		check(serviceLoaded(c), "service "+c.ServiceLabel+" running", "")
-		_, rules, err := cl.TunnelConfig(acct, c.TunnelID)
-		check(err == nil, "ingress readable", fmt.Sprint(err))
-		zs, _ := cl.Zones()
+		rules, err := loadRules()
+		check(err == nil, "tunnel.yml readable", errString(err))
 		for _, r := range c.Routes {
 			if r.State == "stopped" {
 				continue
 			}
 			svc, has := ingress.Service(rules, r.Host)
 			check(has, "ingress rule for "+r.Host, svc)
-			if z, err := zoneFor(zs, r.Host); err == nil {
-				recs, _ := cl.DNSByName(z.ID, r.Host)
-				check(len(recs) == 1 && strings.HasPrefix(recs[0].Content, c.TunnelID), "DNS -> tunnel for "+r.Host, "")
+			if api != nil && r.DNSID != "" {
+				d, err := api.DNSGet(r.ZoneID, r.DNSID)
+				check(err == nil && strings.HasPrefix(d.Content, c.TunnelID), "DNS -> tunnel for "+r.Host, errString(err))
 			}
 		}
 	}
@@ -98,6 +94,15 @@ func cmdDoctor(c *cfg.Config, args []string) error {
 	}
 	return nil
 }
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func indent(s string) string { return "       " + strings.ReplaceAll(s, "\n", "\n       ") }
 
 // cmdImport adopts an existing tunnel into config WITHOUT changing what it serves: read-only discovery, a report,
 // then a config record (config only; no API write, no service change).
@@ -117,15 +122,7 @@ func cmdImport(c *cfg.Config, args []string) error {
 	if target == "" {
 		return fmt.Errorf("usage: cfex import <script|tunnel> [--dry-run]")
 	}
-	cl, err := client(c)
-	if err != nil {
-		return err
-	}
-	acct, err := pickAccount(c, cl)
-	if err != nil {
-		return err
-	}
-	ts, err := cl.Tunnels(acct)
+	ts, err := allTunnels(c)
 	if err != nil {
 		return err
 	}
@@ -147,9 +144,9 @@ func cmdImport(c *cfg.Config, args []string) error {
 		return fmt.Errorf("no account tunnel matches %q (use the tunnel name from `cfex list`)", target)
 	}
 	found := ts[idx]
-	_, rules, _ := cl.TunnelConfig(acct, found.ID)
-	fmt.Printf("tunnel   %s (%s) status=%s class=%s\n", found.Name, found.ID, found.Status, classify(c, found.Name, found.ID))
-	for _, r := range rules {
+	run := map[bool]string{true: "running", false: "down"}[found.Running]
+	fmt.Printf("tunnel   %s (%s) %s class=%s\n", found.Name, found.ID, run, classify(c, found.Name, found.ID))
+	for _, r := range found.Rules {
 		if h, _ := r["hostname"].(string); h != "" {
 			fmt.Printf("route    %s -> %v\n", h, r["service"])
 		}

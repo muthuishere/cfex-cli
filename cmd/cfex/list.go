@@ -1,6 +1,10 @@
 package main
 
 import (
+	"path/filepath"
+
+	"gopkg.in/yaml.v3"
+
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -11,6 +15,7 @@ import (
 	"sync"
 	"text/tabwriter"
 
+	"github.com/muthuishere/cfex-cli/internal/cfd"
 	"github.com/muthuishere/cfex-cli/internal/cfg"
 	"github.com/muthuishere/cfex-cli/internal/disc"
 	"github.com/muthuishere/cfex-cli/internal/ingress"
@@ -27,17 +32,107 @@ type Row struct {
 	Account string `json:"account"`
 }
 
+// tinfo is one tunnel from whichever source is available.
+type tinfo struct {
+	ID, Name, Account string
+	Running           bool
+	Rules             []ingress.Rule
+}
+
+// localRules finds ingress rules for a tunnel id in cfex's own files and in ~/.cloudflared/*.yml.
+func localRules(c *cfg.Config, id string) []ingress.Rule {
+	files, _ := filepath.Glob(filepath.Join(cloudflaredDir(), "*.yml"))
+	more, _ := filepath.Glob(filepath.Join(cfg.StateDir(), "instant", "*.yml"))
+	files = append(append(files, more...), cfg.TunnelFile())
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		var doc struct {
+			Tunnel  string           `yaml:"tunnel"`
+			URL     string           `yaml:"url"`
+			Ingress []map[string]any `yaml:"ingress"`
+		}
+		if yaml.Unmarshal(b, &doc) != nil || doc.Tunnel != id {
+			continue
+		}
+		var rules []ingress.Rule
+		for _, r := range doc.Ingress {
+			rules = append(rules, r)
+		}
+		if doc.URL != "" {
+			rules = append(rules, ingress.Rule{"hostname": "(see " + filepath.Base(f) + ")", "service": doc.URL})
+		}
+		return rules
+	}
+	return nil
+}
+
+func cloudflaredDir() string { h, _ := os.UserHomeDir(); return filepath.Join(h, ".cloudflared") }
+
+// allTunnels lists every tunnel the account has: through cloudflared when it is logged in, otherwise through the API
+// when a token is available. The API (if present) also supplies remote ingress for remotely-managed tunnels.
+func allTunnels(c *cfg.Config) ([]tinfo, error) {
+	api := apiClient(c)
+	var out []tinfo
+	if cfd.HasCert() {
+		ts, err := cfd.List()
+		if err != nil {
+			return nil, err
+		}
+		acct := ""
+		if api != nil {
+			acct, _ = pickAccount(c, api)
+		}
+		for _, t := range ts {
+			ti := tinfo{ID: t.ID, Name: t.Name, Running: t.Running(), Rules: localRules(c, t.ID)}
+			if len(ti.Rules) == 0 && api != nil && acct != "" {
+				_, ti.Rules, _ = api.TunnelConfig(acct, t.ID)
+			}
+			out = append(out, ti)
+		}
+		return out, nil
+	}
+	if api == nil {
+		return nil, fmt.Errorf("cannot list tunnels: cloudflared is not logged in (run `cloudflared tunnel login`) and there is no API token (CLOUDFLARE_API_TOKEN)")
+	}
+	accts, err := api.Accounts()
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range accts {
+		ts, err := api.Tunnels(a.ID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cfex: tunnels of %q: %v\n", a.Name, err)
+			continue
+		}
+		res := make([][]ingress.Rule, len(ts))
+		var wg sync.WaitGroup
+		for i := range ts {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				_, res[i], _ = api.TunnelConfig(a.ID, ts[i].ID)
+				if len(res[i]) == 0 {
+					res[i] = localRules(c, ts[i].ID)
+				}
+			}(i)
+		}
+		wg.Wait()
+		for i, t := range ts {
+			out = append(out, tinfo{ID: t.ID, Name: t.Name, Account: a.Name, Running: t.Status == "healthy", Rules: res[i]})
+		}
+	}
+	return out, nil
+}
+
 func cmdList(c *cfg.Config, args []string) error {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	noHTTP := fs.Bool("no-http", false, "skip live HTTP checks")
 	fs.Parse(args)
-	cl, err := client(c)
-	if err != nil { // v1 behaviour: no API token, just what cloudflared knows
-		fmt.Fprintln(os.Stderr, "note:", err, "\nshowing cloudflared's own tunnel list only (cfex v1 view)")
-		return legacyList()
-	}
-	accts, err := cl.Accounts()
+	tunnels, err := allTunnels(c)
 	if err != nil {
 		return err
 	}
@@ -49,75 +144,58 @@ func cmdList(c *cfg.Config, args []string) error {
 		}
 	}
 	var rows []Row
-	for _, a := range accts {
-		ts, err := cl.Tunnels(a.ID)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "cfex: tunnels of %q: %v\n", a.Name, err)
-			continue
+	for _, t := range tunnels {
+		class := classify(c, t.Name, t.ID)
+		run := "down"
+		if t.Running {
+			run = "running"
 		}
-		type res struct{ rules []ingress.Rule }
-		out := make([]res, len(ts))
-		var wg sync.WaitGroup
-		for i := range ts {
-			wg.Add(1)
-			go func(i int) {
-				defer wg.Done()
-				_, r, _ := cl.TunnelConfig(a.ID, ts[i].ID)
-				out[i] = res{r}
-			}(i)
+		local := "-"
+		j, ok := byID[t.ID]
+		if !ok && t.Name == c.TunnelName {
+			for _, jj := range jobs {
+				if jj.Label == c.ServiceLabel {
+					j, ok = jj, true
+				}
+			}
 		}
-		wg.Wait()
-		for i, t := range ts {
-			class := classify(c, t.Name, t.ID)
-			run := "down"
-			if t.Status == "healthy" {
-				run = "running"
-			} else if t.Status == "degraded" {
-				run = "degraded"
-			}
-			local := "-"
-			j, ok := byID[t.ID]
-			if !ok { // no token-derived match: fall back to launchd label naming
-				for _, jj := range jobs {
-					if sn := disc.ShortName(jj.Label); jj.TunnelID == "" && jj.ForwardPort == "" && (sn == t.Name || sn+"-demo" == t.Name || sn == strings.TrimSuffix(t.Name, "-demo")) {
-						j, ok = jj, true
-					}
+		if !ok { // no token-derived match: fall back to launchd label naming
+			for _, jj := range jobs {
+				if sn := disc.ShortName(jj.Label); jj.TunnelID == "" && jj.ForwardPort == "" && (sn == t.Name || sn+"-demo" == t.Name || sn == strings.TrimSuffix(t.Name, "-demo")) {
+					j, ok = jj, true
 				}
 			}
-			if ok {
-				local = j.Label
-				if !j.Loaded {
-					local += " (not loaded)"
-				}
-				if j.Disabled {
-					local += " (disabled)"
-				}
+		}
+		if ok {
+			local = j.Label
+			if !j.Loaded {
+				local += " (not loaded)"
 			}
-			n := 0
-			for _, r := range out[i].rules {
-				h, _ := r["hostname"].(string)
-				svc, _ := r["service"].(string)
-				if h == "" && strings.HasPrefix(svc, "http_status") {
-					continue
-				}
-				if h == "" {
-					h = "(catch-all)"
-					if class == "legacy" { // a v1 tunnel: its hostname is encoded in the name
-						h = strings.ReplaceAll(strings.TrimPrefix(t.Name, "tunnel_"), "_", ".")
-					}
-				} else if pth, _ := r["path"].(string); pth != "" {
-					h += pth
-				}
-				rows = append(rows, Row{h, portOf(svc), t.Name, class, run, "", local, a.Name})
-				n++
+			if j.Disabled {
+				local += " (disabled)"
 			}
-			if n == 0 {
-				h := "(no routes)"
-				if class == "legacy" {
-					h = strings.ReplaceAll(strings.TrimPrefix(t.Name, "tunnel_"), "_", ".")
-				}
-				rows = append(rows, Row{h, "-", t.Name, class, run, "", local, a.Name})
+		}
+		n := 0
+		for _, r := range t.Rules {
+			h, _ := r["hostname"].(string)
+			svc, _ := r["service"].(string)
+			if h == "" && strings.HasPrefix(svc, "http_status") {
+				continue
 			}
+			if h == "" {
+				h = "(catch-all)"
+			} else if pth, _ := r["path"].(string); pth != "" {
+				h += pth
+			}
+			rows = append(rows, Row{h, portOf(svc), t.Name, class, run, "", local, t.Account})
+			n++
+		}
+		if n == 0 {
+			h := "(no routes known)"
+			if class == "instant" {
+				h = strings.ReplaceAll(strings.TrimPrefix(t.Name, instantPrefix), "-", ".")
+			}
+			rows = append(rows, Row{h, "-", t.Name, class, run, "", local, t.Account})
 		}
 	}
 	// managed routes that are stopped have no ingress rule: show them from config
@@ -208,26 +286,6 @@ func cmdList(c *cfg.Config, args []string) error {
 	sort.Strings(dups)
 	if len(dups) > 0 {
 		fmt.Println("hostnames claimed by more than one rule/tunnel:", strings.Join(dups, ", "))
-	}
-	return nil
-}
-
-// legacyList prints cloudflared's own tunnels the way cfex v1 did.
-func legacyList() error {
-	ts, err := localTunnels()
-	if err != nil {
-		return err
-	}
-	fmt.Println("Active Tunnels:\n----------------------------------------")
-	if len(ts) == 0 {
-		fmt.Println("No active tunnels found.")
-	}
-	for _, t := range ts {
-		n := t.Name
-		if strings.HasPrefix(n, "tunnel_") {
-			n = strings.ReplaceAll(strings.TrimPrefix(n, "tunnel_"), "_", ".")
-		}
-		fmt.Printf("%-40s %s\n", n, t.ID)
 	}
 	return nil
 }

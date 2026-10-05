@@ -5,25 +5,17 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"path"
 	"strings"
 	"time"
 
 	"github.com/muthuishere/cfex-cli/internal/cf"
 	"github.com/muthuishere/cfex-cli/internal/cfg"
-	"github.com/muthuishere/cfex-cli/internal/ingress"
 )
 
 // comment is stamped on every DNS record cfex creates; delete refuses records without it.
 const comment = "managed-by: cfex"
-
-// API is the slice of the Cloudflare client the mutating commands need (a fake in tests).
-type API interface {
-	DNSGet(zone, id string) (cf.DNS, error)
-	DNSDelete(zone, id string) error
-	TunnelConfig(acct, tid string) (map[string]any, []ingress.Rule, error)
-	PutIngress(acct, tid string, full map[string]any, rules []ingress.Rule) error
-}
 
 func matchAny(patterns []string, name string) bool {
 	for _, p := range patterns {
@@ -34,7 +26,7 @@ func matchAny(patterns []string, name string) bool {
 	return false
 }
 
-// classify says whether a tunnel may be touched. Only "managed" and (via confirmation) "legacy" can be mutated.
+// classify says whether a tunnel may be touched. Only "managed" routes and "instant" tunnels (made by `cfex host:port`) can be mutated.
 func classify(c *cfg.Config, tunnel, id string) string {
 	switch {
 	case tunnel == c.TunnelName || (id != "" && id == c.TunnelID):
@@ -43,14 +35,13 @@ func classify(c *cfg.Config, tunnel, id string) string {
 		return "PROTECTED"
 	case matchAny(c.Client, tunnel):
 		return "client"
+	case strings.HasPrefix(tunnel, instantPrefix):
+		return "instant"
 	}
 	for _, a := range c.Adopted {
 		if a.Tunnel == tunnel {
 			return "adopted"
 		}
-	}
-	if strings.HasPrefix(tunnel, "tunnel_") {
-		return "legacy" // created by cfex v1 (`cfex host:port`)
 	}
 	return "unmanaged"
 }
@@ -110,13 +101,15 @@ func listening(port int) bool {
 	return true
 }
 
-func client(c *cfg.Config) (*cf.Client, error) {
-	t := token(c)
-	if t == "" {
-		return nil, fmt.Errorf("no Cloudflare API token: set CLOUDFLARE_API_TOKEN (create one with Zone:DNS:Edit, Zone:Read and Account:Cloudflare Tunnel:Edit) or token_cmd in %s", cfg.Path())
+// apiClient returns the optional Cloudflare API client, or nil when no token is available.
+func apiClient(c *cfg.Config) *cf.Client {
+	if t := token(c); t != "" {
+		return cf.New(t)
 	}
-	return cf.New(t), nil
+	return nil
 }
+
+const noTokenHint = "no API token: set CLOUDFLARE_API_TOKEN (Zone:Read, DNS:Edit) to enable DNS ownership checks and DNS deletion"
 
 // pickAccount uses account_id from config; otherwise the token's only account. Several accounts: the user must choose.
 func pickAccount(c *cfg.Config, cl *cf.Client) (string, error) {
@@ -138,4 +131,33 @@ func pickAccount(c *cfg.Config, cl *cf.Client) (string, error) {
 		names = append(names, a.Name+" ("+a.ID+")")
 	}
 	return "", fmt.Errorf("token sees several accounts, set account_id in %s: %s", cfg.Path(), strings.Join(names, ", "))
+}
+
+// validateZone, when an API token is available, checks that the host's domain is visible to it and explains the usual
+// causes if not. Without a token the check is skipped (cloudflared reports problems itself).
+func validateZone(c *cfg.Config, host string) error {
+	cl := apiClient(c)
+	if cl == nil {
+		return nil
+	}
+	zones, err := cl.Zones()
+	if err == nil {
+		_, err = zoneFor(zones, host)
+	}
+	if err != nil {
+		return fmt.Errorf("could not fetch zone data for %s: %v\nPossible issues:\n1. Invalid API token\n2. The domain is not in your Cloudflare account\n3. The API token has no permission for this zone", host, err)
+	}
+	return nil
+}
+
+// isTTY reports whether stdin is an interactive terminal (a variable so tests can force either answer).
+var isTTY = func() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		return false
+	}
+	if null, err := os.Stat(os.DevNull); err == nil && os.SameFile(fi, null) {
+		return false
+	}
+	return true
 }
