@@ -38,3 +38,4 @@ examples/**/out/
 *.tmp
 *.temp
 .cache/
+/cfex

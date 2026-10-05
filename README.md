@@ -1,6 +1,39 @@
 # cfex - Cloudflare Exposer CLI
 [![Discord](https://img.shields.io/badge/AgentNexus-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/V9C2kvHC8D)
 
+> **v2 (Go)** adds a durable mode and a machine-wide view on top of everything v1 does. All v1 commands
+> (`cfex host:3000`, `cfex host 3000`, `--https`, `--verify-cert`, `cfex list`, `cfex delete host`) keep working.
+> The v1 bash script is still in `bin/cfex` until the Go binary is released.
+
+```bash
+cfex dev.example.com:3000          # v1: foreground tunnel, Ctrl+C stops it
+cfex add 3000 dev.example.com      # v2: durable route on cfex's own tunnel, survives reboots (launchd / systemd)
+cfex list                          # EVERYTHING on this machine, with live HTTP status
+cfex stop dev.example.com          # stop serving, keep config + DNS      (cfex start to resume)
+cfex delete dev.example.com        # dry run; --yes to apply
+cfex status | doctor | import <script|tunnel>
+```
+
+### What v2 adds
+- **`add`**: one named tunnel owned by cfex; each route adds ONE ingress rule (a pure, unit-tested merge that never touches other
+  rules) and a proxied CNAME stamped `managed-by: cfex`. The connector runs under launchd (macOS) or a systemd user unit (Linux).
+- **`list`**: managed routes plus everything else cloudflared-ish on the machine: account tunnels with their ingress rules, launchd
+  jobs, `~/.cloudflared` scripts, live HTTP status. Classes: `managed`, `PROTECTED`, `client`, `adopted`, `legacy` (v1), `unmanaged`.
+- **Safety**: only routes cfex created can be stopped/deleted. `delete` is a dry run unless `--yes` and refuses any DNS record without
+  the `managed-by: cfex` comment. List tunnels you never want touched under `protected:` / `client:` in the config.
+- **Secrets**: the API token is read from `CLOUDFLARE_API_TOKEN` only (or `token_cmd` runs cfex under your secret manager); it is never
+  printed or written to disk. The connector token is a 0600 file, or lives in your secret manager (`connector_run_cmd`).
+- `import` adopts an existing tunnel into the config without changing what it serves. `doctor` checks cloudflared, the token, the
+  service, DNS <-> ingress consistency and lists plaintext token files by name.
+
+Config: `~/.config/cfex/config.yaml` (see `config.example.yaml`). Token permissions: Zone:Read, DNS:Edit, Account: Cloudflare Tunnel:Edit.
+Build: `make build` · test: `make test` (the suite refuses to run unless `CFEX_CONFIG` points under the temp dir).
+
+Behaviour differences from v1: replacing an orphaned DNS record now only happens when it is a tunnel CNAME (v1 deleted any record
+of that name); `cfex list` without an API token falls back to the v1 view.
+
+---
+
 Expose your local services to the internet using your domain names via Cloudflare's tunneling technology. With cfex, you can create instant HTTPS endpoints for any local service without port forwarding or static IPs.
 
 ## What is cfex?
