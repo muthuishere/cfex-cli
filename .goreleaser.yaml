@@ -1,0 +1,25 @@
+version: 2
+project_name: cfex
+before:
+  hooks:
+    - go mod tidy
+builds:
+  - id: cfex
+    main: ./cmd/cfex
+    binary: cfex
+    env: [CGO_ENABLED=0]
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    ldflags: ["-s -w -X main.version={{.Version}}"]
+archives:
+  - id: cfex
+    formats: [tar.gz]
+    name_template: "cfex_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files: [LICENSE, README.md]
+checksum:
+  name_template: checksums.txt
+changelog:
+  disable: true
+release:
+  extra_files:
+    - glob: ./install.sh

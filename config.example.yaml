@@ -1,0 +1,27 @@
+# ~/.config/cfex/config.yaml  (every key is optional)
+
+# `cfex add 3000 app` means app.example.com. Without it, hosts must be fully qualified.
+default_zone: example.com
+
+# Needed only if your token can see several Cloudflare accounts.
+# account_id: 0123456789abcdef0123456789abcdef   # only for the API features, when the token sees several accounts
+
+# The one tunnel cfex owns for durable routes (`cfex add`), and the launchd label / systemd unit that runs it.
+tunnel_name: cfex
+service_label: dev.cfex.tunnel
+
+# The Cloudflare API token is OPTIONAL (cfex drives cloudflared). It adds DNS ownership checks, DNS deletion and remote ingress
+# in `list`. By default the environment variable CLOUDFLARE_API_TOKEN
+# (CLOUDFLARE_API_KEY, the cfex v1 name, also works).
+# token_env: CLOUDFLARE_API_TOKEN
+# Or run cfex under a secret manager so the token only exists in cfex's own environment:
+# token_cmd: "op run --"                       # 1Password; the command must export token_env
+# token_cmd: "sec run MY_CF_TOKEN --"          # token_env: MY_CF_TOKEN
+
+# Tunnel-name globs cfex lists but NEVER modifies (stop/start/delete are refused).
+protected: []        # e.g. ["billing", "prod-*"]
+client: []           # e.g. ["acme-demo"]: shown as class "client"
+
+# Written by cfex:
+routes: []
+adopted: []
